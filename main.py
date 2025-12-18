@@ -386,6 +386,233 @@ def fetch_liquidity_proxy():
         return None, str(e)
 
 
+@st.cache_data(ttl=21600, show_spinner=False)  # 6 saat cache
+def fetch_fear_greed_index():
+    """
+    Crypto Fear & Greed Index (Alternative.me API).
+    0-24: Extreme Fear
+    25-49: Fear
+    50-74: Greed
+    75-100: Extreme Greed
+    """
+    try:
+        url = "https://api.alternative.me/fng/?limit=30"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            fng_data = data.get('data', [])
+            
+            if fng_data:
+                current = fng_data[0]
+                value = int(current.get('value', 50))
+                classification = current.get('value_classification', 'Neutral')
+                
+                # 7 günlük ortalama
+                if len(fng_data) >= 7:
+                    avg_7d = sum(int(d['value']) for d in fng_data[:7]) / 7
+                else:
+                    avg_7d = value
+                
+                return {
+                    'value': value,
+                    'classification': classification,
+                    'avg_7d': avg_7d,
+                    'history': [{'date': d['timestamp'], 'value': int(d['value'])} for d in fng_data]
+                }, None
+        return None, "API yanıt vermedi"
+    except Exception as e:
+        return None, str(e)
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def fetch_market_sentiment():
+    """
+    Piyasa duyarlılık göstergeleri.
+    VIX ve SKEW kullanarak piyasa stresini ölçer.
+    """
+    import yfinance as yf
+    
+    try:
+        vix = yf.Ticker('^VIX')
+        # SKEW: Tail risk göstergesi
+        
+        vix_hist = vix.history(period='30d')
+        
+        if vix_hist.empty:
+            return None, "VIX verisi alınamadı"
+        
+        vix_current = float(vix_hist['Close'].iloc[-1])
+        vix_avg = float(vix_hist['Close'].mean())
+        vix_high = float(vix_hist['Close'].max())
+        
+        # Sentiment skoru (0-100, yüksek = olumlu)
+        if vix_current < 15:
+            sentiment_score = 85
+            sentiment_label = "Aşırı İyimser"
+        elif vix_current < 20:
+            sentiment_score = 70
+            sentiment_label = "İyimser"
+        elif vix_current < 25:
+            sentiment_score = 50
+            sentiment_label = "Nötr"
+        elif vix_current < 30:
+            sentiment_score = 30
+            sentiment_label = "Endişeli"
+        else:
+            sentiment_score = 15
+            sentiment_label = "Panik"
+        
+        return {
+            'vix_current': vix_current,
+            'vix_avg_30d': vix_avg,
+            'vix_high_30d': vix_high,
+            'sentiment_score': sentiment_score,
+            'sentiment_label': sentiment_label
+        }, None
+    except Exception as e:
+        return None, str(e)
+
+
+def analyze_market_regime(macro_data: dict, liquidity_data: dict = None, 
+                          yield_data: dict = None, sentiment_data: dict = None,
+                          fng_data: dict = None) -> dict:
+    """
+    Piyasa Rejimi Analizi - 4 Rejim Modeli.
+    
+    Rejim 1: Enflasyonist Büyüme (Kripto/Hisse Dostu)
+        - Likidite artıyor, VIX düşük, DXY zayıf
+    
+    Rejim 2: Stagflasyon (Altın Dostu, Kripto Riskli)
+        - Yüksek enflasyon + düşük büyüme
+        
+    Rejim 3: Deflasyonist Resesyon (Nakit/Tahvil Dostu)
+        - Getiri eğrisi ters, VIX yüksek
+        
+    Rejim 4: Goldilocks (Her Şey İyi)
+        - Düşük enflasyon, normal büyüme, likidite bol
+    
+    Returns:
+        dict: regime, description, best_asset, confidence
+    """
+    scores = {
+        'growth': 0,      # Büyüme skoru
+        'inflation': 0,   # Enflasyon baskısı
+        'liquidity': 0,   # Likidite durumu
+        'risk': 0         # Risk iştahı
+    }
+    
+    # Likidite analizi
+    if liquidity_data:
+        liq_trend = liquidity_data.get('liquidity_trend', 'STABIL')
+        if liq_trend == "ARTIYOR":
+            scores['liquidity'] += 30
+            scores['growth'] += 20
+        elif liq_trend == "AZALIYOR":
+            scores['liquidity'] -= 30
+            scores['growth'] -= 10
+    
+    # Getiri eğrisi analizi
+    if yield_data:
+        if yield_data.get('inverted', False):
+            scores['growth'] -= 40  # Resesyon sinyali
+            scores['risk'] -= 30
+        elif yield_data.get('spread', 1) < 0.5:
+            scores['growth'] -= 20
+    
+    # DXY analizi
+    if macro_data.get('DXY'):
+        dxy_val = macro_data['DXY']['value']
+        if dxy_val > 105:
+            scores['liquidity'] -= 20
+            scores['inflation'] += 10
+        elif dxy_val < 100:
+            scores['liquidity'] += 20
+            scores['risk'] += 15
+    
+    # VIX analizi
+    if macro_data.get('VIX'):
+        vix_val = macro_data['VIX']['value']
+        if vix_val > 30:
+            scores['risk'] -= 40
+        elif vix_val < 20:
+            scores['risk'] += 30
+    
+    # Altın analizi (enflasyon proxy)
+    if macro_data.get('Gold'):
+        gold_change = macro_data['Gold'].get('change_30d', 0)
+        if gold_change > 5:
+            scores['inflation'] += 25
+        elif gold_change < -5:
+            scores['inflation'] -= 15
+    
+    # Fear & Greed
+    if fng_data:
+        fng_val = fng_data.get('value', 50)
+        if fng_val > 70:
+            scores['risk'] += 20
+        elif fng_val < 30:
+            scores['risk'] -= 20
+    
+    # Rejim belirleme
+    total_growth = scores['growth'] + scores['liquidity']
+    total_risk = scores['risk']
+    inflation_pressure = scores['inflation']
+    
+    if total_growth > 30 and total_risk > 20 and inflation_pressure < 20:
+        regime = "GOLDILOCKS"
+        description = "Goldilocks: Düşük enflasyon, sağlıklı büyüme, bol likidite"
+        best_asset = "🪙 Kripto & 📈 Hisse"
+        color = "#00C853"
+        confidence = min(90, 50 + total_growth // 2)
+    elif total_growth > 20 and inflation_pressure > 15:
+        regime = "ENFLASYONIST BÜYÜME"
+        description = "Enflasyonist Büyüme: Likidite bol ama enflasyon baskısı var"
+        best_asset = "🪙 Kripto & 🥇 Altın"
+        color = "#FF9800"
+        confidence = min(85, 50 + total_growth // 3)
+    elif inflation_pressure > 25 and total_growth < 0:
+        regime = "STAGFLASYON"
+        description = "Stagflasyon: Yüksek enflasyon + düşük büyüme - en kötü senaryo"
+        best_asset = "🥇 Altın & 💵 Nakit"
+        color = "#FF5722"
+        confidence = min(80, 40 + inflation_pressure)
+    elif total_growth < -20 or (yield_data and yield_data.get('inverted')):
+        regime = "RESESYON RİSKİ"
+        description = "Deflasyonist Resesyon: Getiri eğrisi ters, büyüme yavaşlıyor"
+        best_asset = "📜 Tahvil & 💵 Nakit"
+        color = "#FF1744"
+        confidence = min(85, 60 - total_growth // 2)
+    else:
+        regime = "KARIŞIK SİNYALLER"
+        description = "Geçiş Dönemi: Piyasa yön arıyor, dikkatli olun"
+        best_asset = "⚖️ Dengeli Portföy"
+        color = "#9E9E9E"
+        confidence = 50
+    
+    # Session state'e kaydet
+    st.session_state['market_regime'] = regime
+    st.session_state['feature_matrix'] = {
+        'scores': scores,
+        'regime': regime,
+        'dxy': macro_data.get('DXY', {}).get('value'),
+        'vix': macro_data.get('VIX', {}).get('value'),
+        'gold_change': macro_data.get('Gold', {}).get('change_30d'),
+        'liquidity_trend': liquidity_data.get('liquidity_trend') if liquidity_data else None,
+        'yield_spread': yield_data.get('spread') if yield_data else None,
+        'fng': fng_data.get('value') if fng_data else None
+    }
+    
+    return {
+        'regime': regime,
+        'description': description,
+        'best_asset': best_asset,
+        'color': color,
+        'confidence': confidence,
+        'scores': scores
+    }
+
+
 def calculate_risk_score(macro_data: dict, liquidity_data: dict = None, yield_data: dict = None) -> tuple:
     """
     Gelişmiş Risk İştahı Skoru (0-100) hesaplar.
@@ -1290,16 +1517,125 @@ def render_onchain_page():
 
 
 def render_macro_page():
-    """Makro Ekonomi Sayfası - Risk Pusulası"""
-    st.title("📊 Makro Ekonomi - Risk Pusulası")
-    st.caption("Küresel piyasa göstergeleri, likidite takibi ve yatırım karar desteği")
+    """Makro Ekonomi Sayfası - Piyasa Pusulası v3"""
+    st.title("📊 Makro Ekonomi - Piyasa Pusulası v3")
+    st.caption("Likidite takibi, piyasa rejimi analizi ve yatırım karar desteği")
     st.divider()
     
-    # Makro verileri çek
+    # Makro verileri çek (Lazy Loading)
     with st.spinner("Makro veriler yükleniyor..."):
         macro_data = fetch_macro_data()
         liquidity_data, liq_err = fetch_liquidity_proxy()
         yield_data, yield_err = fetch_yield_curve_data()
+        fng_data, fng_err = fetch_fear_greed_index()
+        sentiment_data, sent_err = fetch_market_sentiment()
+    
+    # ==================== PİYASA REJİMİ ====================
+    st.subheader("🎯 Piyasa Rejimi Analizi")
+    
+    regime_analysis = analyze_market_regime(macro_data, liquidity_data, yield_data, sentiment_data, fng_data)
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        regime_color = regime_analysis['color']
+        st.markdown(f"""
+        <div style="text-align: center; padding: 20px; background: linear-gradient(135deg, {regime_color}22, {regime_color}44); border-radius: 15px; border: 3px solid {regime_color};">
+            <h2 style="color: {regime_color}; margin: 0; font-size: 1.3rem;">{regime_analysis['regime']}</h2>
+            <p style="color: #888; margin: 10px 0; font-size: 0.9rem;">Güven: %{regime_analysis['confidence']}</p>
+            <h3 style="color: {regime_color}; margin: 0;">En İyi Varlık:</h3>
+            <h2 style="color: {regime_color}; margin: 5px 0;">{regime_analysis['best_asset']}</h2>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.info(regime_analysis['description'])
+        
+        # Skor detayları
+        scores = regime_analysis['scores']
+        with st.expander("📊 Rejim Skorları"):
+            score_cols = st.columns(4)
+            with score_cols[0]:
+                st.metric("📈 Büyüme", f"{scores['growth']:+d}")
+            with score_cols[1]:
+                st.metric("💰 Likidite", f"{scores['liquidity']:+d}")
+            with score_cols[2]:
+                st.metric("🔥 Enflasyon", f"{scores['inflation']:+d}")
+            with score_cols[3]:
+                st.metric("⚡ Risk", f"{scores['risk']:+d}")
+    
+    st.divider()
+    
+    # ==================== FEAR & GREED ====================
+    st.subheader("😱 Kripto Fear & Greed Index")
+    
+    if fng_data:
+        fng_cols = st.columns([1, 2, 1])
+        
+        with fng_cols[0]:
+            fng_val = fng_data['value']
+            if fng_val < 25:
+                fng_color = "#FF1744"
+                fng_label = "Extreme Fear"
+            elif fng_val < 45:
+                fng_color = "#FF5722"
+                fng_label = "Fear"
+            elif fng_val < 55:
+                fng_color = "#FF9800"
+                fng_label = "Neutral"
+            elif fng_val < 75:
+                fng_color = "#8BC34A"
+                fng_label = "Greed"
+            else:
+                fng_color = "#00C853"
+                fng_label = "Extreme Greed"
+            
+            st.markdown(f"""
+            <div style="text-align: center; padding: 20px; background: {fng_color}22; border-radius: 15px; border: 3px solid {fng_color};">
+                <h1 style="color: {fng_color}; margin: 0; font-size: 3rem;">{fng_val}</h1>
+                <p style="color: {fng_color}; margin: 0;">{fng_label}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with fng_cols[1]:
+            # Fear & Greed grafiği
+            if fng_data.get('history'):
+                import pandas as pd
+                fng_df = pd.DataFrame(fng_data['history'])
+                fng_df['date'] = pd.to_datetime(fng_df['date'].astype(int), unit='s')
+                
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=fng_df['date'],
+                    y=fng_df['value'],
+                    mode='lines+markers',
+                    fill='tozeroy',
+                    line=dict(color='#FF9800', width=2),
+                    name='F&G Index'
+                ))
+                
+                # Referans çizgileri
+                fig.add_hline(y=25, line_dash="dash", line_color="red", annotation_text="Korku")
+                fig.add_hline(y=75, line_dash="dash", line_color="green", annotation_text="Açgözlülük")
+                
+                fig.update_layout(
+                    template="plotly_dark",
+                    height=200,
+                    margin=dict(l=0, r=0, t=10, b=0),
+                    yaxis=dict(range=[0, 100])
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with fng_cols[2]:
+            st.metric("7 Gün Ort.", f"{fng_data['avg_7d']:.0f}")
+            if fng_val < 30:
+                st.success("💡 Aşırı korku = Alım fırsatı olabilir")
+            elif fng_val > 70:
+                st.warning("💡 Aşırı açgözlülük = Dikkatli ol")
+    else:
+        st.warning(f"Fear & Greed verisi alınamadı: {fng_err}")
+    
+    st.divider()
     
     # ==================== RİSK PUSULASI ====================
     st.subheader("🧭 Risk Pusulası v2.0")
@@ -1310,7 +1646,6 @@ def render_macro_page():
     if risk_alerts:
         for alert in risk_alerts:
             st.error(alert)
-    
     # Risk durumu kartı
     if risk_score > 70:
         risk_mode = "RISK-ON"
