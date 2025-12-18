@@ -227,7 +227,7 @@ def fetch_ethereum_data():
         return None, str(e)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=21600, show_spinner=False)  # 6 saat cache
 def fetch_macro_data():
     """Genişletilmiş makro ekonomi verileri."""
     import yfinance as yf
@@ -235,11 +235,13 @@ def fetch_macro_data():
     symbols = {
         'DXY': 'DX-Y.NYB',      # Dolar Endeksi
         'US10Y': '^TNX',         # ABD 10Y Tahvil
+        'US02Y': '^IRX',         # ABD 2Y (yaklaşık - 13 hafta)
         'VIX': '^VIX',           # Korku Endeksi
         'Gold': 'GC=F',          # Altın
         'Silver': 'SI=F',        # Gümüş
         'Oil': 'CL=F',           # WTI Petrol
         'USDJPY': 'JPY=X',       # USD/JPY (Carry Trade)
+        'TLT': 'TLT',            # Uzun vadeli tahvil ETF (likidite proxy)
     }
     
     results = {}
@@ -247,22 +249,28 @@ def fetch_macro_data():
     for name, symbol in symbols.items():
         try:
             ticker = yf.Ticker(symbol)
-            hist = ticker.history(period='30d')
+            hist = ticker.history(period='60d')
             
             if not hist.empty:
-                last = hist['Close'].iloc[-1]
-                prev = hist['Close'].iloc[-2] if len(hist) > 1 else last
+                # Float32 optimizasyonu
+                last = float(hist['Close'].iloc[-1])
+                prev = float(hist['Close'].iloc[-2]) if len(hist) > 1 else last
                 change = ((last - prev) / prev) * 100 if prev != 0 else 0
                 
                 # 5 günlük değişim
-                prev_5d = hist['Close'].iloc[-5] if len(hist) >= 5 else hist['Close'].iloc[0]
+                prev_5d = float(hist['Close'].iloc[-5]) if len(hist) >= 5 else float(hist['Close'].iloc[0])
                 change_5d = ((last - prev_5d) / prev_5d) * 100 if prev_5d != 0 else 0
+                
+                # 30 günlük değişim
+                prev_30d = float(hist['Close'].iloc[0]) if len(hist) >= 20 else float(hist['Close'].iloc[0])
+                change_30d = ((last - prev_30d) / prev_30d) * 100 if prev_30d != 0 else 0
                 
                 results[name] = {
                     'value': last,
                     'change': change,
                     'change_5d': change_5d,
-                    'history': hist
+                    'change_30d': change_30d,
+                    'history': hist[['Close']].astype('float32')  # Sadece Close, float32
                 }
             else:
                 results[name] = None
@@ -272,27 +280,168 @@ def fetch_macro_data():
     return results
 
 
-def calculate_risk_score(macro_data: dict) -> tuple:
+@st.cache_data(ttl=21600, show_spinner=False)  # 6 saat cache
+def fetch_yield_curve_data():
+    """Getiri eğrisi verisi (10Y-2Y spread)."""
+    import yfinance as yf
+    
+    try:
+        # 10 Yıllık ve 2 Yıllık tahvil getirisi
+        us10y = yf.Ticker('^TNX')
+        us02y = yf.Ticker('^IRX')  # 13 hafta T-Bill (2Y proxy)
+        
+        hist_10y = us10y.history(period='1y')
+        hist_02y = us02y.history(period='1y')
+        
+        if hist_10y.empty or hist_02y.empty:
+            return None, "Tahvil verisi alınamadı"
+        
+        # Son değerler
+        y10_last = float(hist_10y['Close'].iloc[-1])
+        y02_last = float(hist_02y['Close'].iloc[-1])
+        
+        # Spread (10Y - 2Y)
+        spread = y10_last - y02_last
+        
+        # Tarihsel spread hesapla
+        hist_10y.index = hist_10y.index.date
+        hist_02y.index = hist_02y.index.date
+        
+        # Ortak tarihleri bul
+        common_dates = set(hist_10y.index) & set(hist_02y.index)
+        
+        spread_history = []
+        for date in sorted(common_dates):
+            try:
+                s10 = float(hist_10y.loc[date, 'Close'])
+                s02 = float(hist_02y.loc[date, 'Close'])
+                spread_history.append({'date': date, 'spread': s10 - s02})
+            except:
+                continue
+        
+        return {
+            'us10y': y10_last,
+            'us02y': y02_last,
+            'spread': spread,
+            'inverted': spread < 0,
+            'history': spread_history[-60:] if spread_history else []  # Son 60 gün
+        }, None
+    except Exception as e:
+        return None, str(e)
+
+
+@st.cache_data(ttl=21600, show_spinner=False)  # 6 saat cache
+def fetch_liquidity_proxy():
     """
-    Risk İştahı Skoru (0-100) hesaplar.
+    Likidite Proxy Endeksi.
+    
+    Gerçek Fed bilançosu verisi için FRED API key gerekiyor.
+    Alternatif olarak TLT (uzun vadeli tahvil ETF) ve M2V kullanıyoruz.
+    TLT yükselirse → faizler düşüyor → likidite artıyor
+    """
+    import yfinance as yf
+    
+    try:
+        # TLT: iShares 20+ Year Treasury Bond ETF
+        # Likidite proxy'si olarak kullanılır
+        tlt = yf.Ticker('TLT')
+        spy = yf.Ticker('SPY')  # S&P 500 ETF
+        btc = yf.Ticker('BTC-USD')
+        
+        tlt_hist = tlt.history(period='1y')
+        spy_hist = spy.history(period='1y')
+        btc_hist = btc.history(period='1y')
+        
+        if tlt_hist.empty:
+            return None, "TLT verisi alınamadı"
+        
+        tlt_last = float(tlt_hist['Close'].iloc[-1])
+        tlt_prev = float(tlt_hist['Close'].iloc[-30]) if len(tlt_hist) >= 30 else float(tlt_hist['Close'].iloc[0])
+        tlt_change = ((tlt_last - tlt_prev) / tlt_prev) * 100
+        
+        # Likidite skoru: TLT yükseliyorsa likidite artıyor
+        if tlt_change > 5:
+            liquidity_trend = "ARTIYOR"
+            liquidity_score = 20
+        elif tlt_change < -5:
+            liquidity_trend = "AZALIYOR"
+            liquidity_score = -20
+        else:
+            liquidity_trend = "STABIL"
+            liquidity_score = 0
+        
+        # BTC ve TLT tarihsel karşılaştırma
+        btc_history = btc_hist[['Close']].copy() if not btc_hist.empty else None
+        tlt_history = tlt_hist[['Close']].copy()
+        
+        return {
+            'tlt_value': tlt_last,
+            'tlt_change_30d': tlt_change,
+            'liquidity_trend': liquidity_trend,
+            'liquidity_score': liquidity_score,
+            'tlt_history': tlt_history.astype('float32'),
+            'btc_history': btc_history.astype('float32') if btc_history is not None else None
+        }, None
+    except Exception as e:
+        return None, str(e)
+
+
+def calculate_risk_score(macro_data: dict, liquidity_data: dict = None, yield_data: dict = None) -> tuple:
+    """
+    Gelişmiş Risk İştahı Skoru (0-100) hesaplar.
     
     RISK-ON faktörler (skoru artırır):
     - DXY düşük (<100) → Zayıf dolar, likidite bol
     - VIX düşük (<20) → Piyasa sakin
+    - Net Likidite artıyor → Fed gevşiyor
     - Petrol yükseliyor → Ekonomik aktivite güçlü
     
     RISK-OFF faktörler (skoru düşürür):
     - VIX yüksek (>30) → Korku yüksek
-    - JPY güçleniyor (düşük USDJPY) → Carry trade çözülüyor
+    - JPY güçleniyor → Carry trade çözülüyor
+    - Getiri eğrisi tersine dönmüş → Resesyon riski
     - Altın yükseliyor → Güvenli liman talebi
     
     Returns:
-        (score, factors): Skor ve faktör listesi
+        (score, factors, alerts): Skor, faktör listesi ve kritik uyarılar
     """
     score = 50  # Nötr başla
     factors = []
+    alerts = []  # Kritik uyarılar
     
-    # DXY etkisi (-15 to +15)
+    # ==================== LİKİDİTE ANALİZİ (+/-20) ====================
+    if liquidity_data:
+        liq_score = liquidity_data.get('liquidity_score', 0)
+        liq_trend = liquidity_data.get('liquidity_trend', 'STABIL')
+        tlt_change = liquidity_data.get('tlt_change_30d', 0)
+        
+        score += liq_score
+        
+        if liq_trend == "ARTIYOR":
+            factors.append(("🟢 Likidite Artıyor", f"TLT: +{tlt_change:.1f}% (Fed gevşiyor)"))
+        elif liq_trend == "AZALIYOR":
+            factors.append(("🔴 Likidite Azalıyor", f"TLT: {tlt_change:.1f}% (Fed sıkılaştırıyor)"))
+            alerts.append("⚠️ Likidite daralıyor - riskli varlıklar baskı altında")
+        else:
+            factors.append(("🟡 Likidite Stabil", f"TLT: {tlt_change:+.1f}%"))
+    
+    # ==================== GETİRİ EĞRİSİ ANALİZİ (+/-15) ====================
+    if yield_data:
+        spread = yield_data.get('spread', 0)
+        inverted = yield_data.get('inverted', False)
+        
+        if inverted:
+            score -= 15
+            factors.append(("🔴 Getiri Eğrisi Ters", f"Spread: {spread:.2f}% (10Y < 2Y)"))
+            alerts.append("🚨 RESESYON ALARMI: Getiri eğrisi tersine döndü!")
+        elif spread < 0.5:
+            score -= 5
+            factors.append(("🟡 Düzleşen Eğri", f"Spread: {spread:.2f}% (Dikkat)"))
+        else:
+            score += 10
+            factors.append(("🟢 Normal Eğri", f"Spread: {spread:.2f}%"))
+    
+    # ==================== DXY ANALİZİ (+/-15) ====================
     dxy = macro_data.get('DXY')
     if dxy:
         dxy_val = dxy['value']
@@ -305,7 +454,7 @@ def calculate_risk_score(macro_data: dict) -> tuple:
         else:
             factors.append(("🟡 Nötr Dolar", f"DXY: {dxy_val:.1f}"))
     
-    # VIX etkisi (-20 to +20)
+    # ==================== VIX ANALİZİ (+/-20) ====================
     vix = macro_data.get('VIX')
     if vix:
         vix_val = vix['value']
@@ -318,27 +467,31 @@ def calculate_risk_score(macro_data: dict) -> tuple:
         elif vix_val > 30:
             score -= 20
             factors.append(("🔴 Yüksek Korku", f"VIX: {vix_val:.1f} > 30"))
+            alerts.append("⚠️ VIX 30 üzerinde - volatilite yüksek")
         elif vix_val > 25:
             score -= 10
             factors.append(("🟡 Artan Korku", f"VIX: {vix_val:.1f}"))
         else:
             factors.append(("🟡 Orta Korku", f"VIX: {vix_val:.1f}"))
     
-    # USD/JPY etkisi (-10 to +10) - Carry Trade barometresi
+    # ==================== CARRY TRADE / YEN ANALİZİ (+/-10) ====================
     usdjpy = macro_data.get('USDJPY')
     if usdjpy:
         jpy_val = usdjpy['value']
-        # Yüksek USDJPY = zayıf Yen = risk-on
+        jpy_change = usdjpy.get('change_5d', 0)
+        
         if jpy_val > 155:
             score += 10
             factors.append(("🟢 Zayıf Yen", f"USD/JPY: {jpy_val:.1f} (Carry Trade aktif)"))
         elif jpy_val < 145:
             score -= 10
             factors.append(("🔴 Güçlü Yen", f"USD/JPY: {jpy_val:.1f} (Carry Trade çözülüyor)"))
+            if jpy_change < -2:
+                alerts.append("⚠️ Yen hızla güçleniyor - carry trade riski")
         else:
             factors.append(("🟡 Stabil Yen", f"USD/JPY: {jpy_val:.1f}"))
     
-    # Petrol trendi (-5 to +5)
+    # ==================== EMTİA ANALİZİ (+/-5) ====================
     oil = macro_data.get('Oil')
     if oil:
         oil_change = oil.get('change_5d', 0)
@@ -349,7 +502,6 @@ def calculate_risk_score(macro_data: dict) -> tuple:
             score -= 5
             factors.append(("🔴 Petrol Düşüyor", f"{oil_change:.1f}% (Talep endişesi)"))
     
-    # Altın trendi (-5 to +5)
     gold = macro_data.get('Gold')
     if gold:
         gold_change = gold.get('change_5d', 0)
@@ -360,7 +512,11 @@ def calculate_risk_score(macro_data: dict) -> tuple:
             score += 5
             factors.append(("🟢 Altın Düşüyor", f"{gold_change:.1f}% (Risk-on sinyali)"))
     
-    return max(0, min(100, score)), factors
+    # Session state'e kaydet
+    st.session_state['risk_score'] = max(0, min(100, score))
+    st.session_state['risk_alerts'] = alerts
+    
+    return max(0, min(100, score)), factors, alerts
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -1136,17 +1292,24 @@ def render_onchain_page():
 def render_macro_page():
     """Makro Ekonomi Sayfası - Risk Pusulası"""
     st.title("📊 Makro Ekonomi - Risk Pusulası")
-    st.caption("Küresel piyasa göstergeleri ve yatırım karar desteği")
+    st.caption("Küresel piyasa göstergeleri, likidite takibi ve yatırım karar desteği")
     st.divider()
     
     # Makro verileri çek
     with st.spinner("Makro veriler yükleniyor..."):
         macro_data = fetch_macro_data()
+        liquidity_data, liq_err = fetch_liquidity_proxy()
+        yield_data, yield_err = fetch_yield_curve_data()
     
     # ==================== RİSK PUSULASI ====================
-    st.subheader("🧭 Risk Pusulası")
+    st.subheader("🧭 Risk Pusulası v2.0")
     
-    risk_score, risk_factors = calculate_risk_score(macro_data)
+    risk_score, risk_factors, risk_alerts = calculate_risk_score(macro_data, liquidity_data, yield_data)
+    
+    # Kritik uyarılar varsa göster
+    if risk_alerts:
+        for alert in risk_alerts:
+            st.error(alert)
     
     # Risk durumu kartı
     if risk_score > 70:
@@ -1296,6 +1459,134 @@ def render_macro_page():
             st.write("• **Gold-DXY**: Genellikle negatif korelasyon")
     else:
         st.warning(f"Korelasyon verisi alınamadı: {corr_error}")
+    
+    st.divider()
+    
+    # ==================== LİKİDİTE vs BTC ====================
+    st.subheader("💰 Likidite vs Bitcoin")
+    st.caption("TLT (Uzun vadeli tahvil ETF) likidite proxy'si olarak kullanılır")
+    
+    if liquidity_data and liquidity_data.get('btc_history') is not None:
+        tlt_hist = liquidity_data['tlt_history']
+        btc_hist = liquidity_data['btc_history']
+        
+        fig = go.Figure()
+        
+        # TLT (sol eksen)
+        fig.add_trace(go.Scatter(
+            x=tlt_hist.index,
+            y=tlt_hist['Close'],
+            name='TLT (Likidite)',
+            line=dict(color='#2196F3', width=2),
+            yaxis='y'
+        ))
+        
+        # BTC (sağ eksen)
+        fig.add_trace(go.Scatter(
+            x=btc_hist.index,
+            y=btc_hist['Close'],
+            name='Bitcoin',
+            line=dict(color='#FF9800', width=2),
+            yaxis='y2'
+        ))
+        
+        fig.update_layout(
+            template="plotly_dark",
+            height=350,
+            margin=dict(l=0, r=0, t=20, b=20),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            yaxis=dict(title="TLT ($)", side="left"),
+            yaxis2=dict(title="BTC ($)", side="right", overlaying="y")
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Likidite açıklaması
+        with st.expander("💡 Likidite Neden Önemli?"):
+            st.write("""
+            **TLT yükselirse** → Tahvil faizleri düşüyor → Fed gevşiyor → Likidite artıyor → BTC için olumlu
+            
+            **TLT düşerse** → Tahvil faizleri yükseliyor → Fed sıkılaştırıyor → Likidite azalıyor → BTC için olumsuz
+            
+            Bu ilişki %100 değildir ama uzun vadeli trendlerde genellikle geçerlidir.
+            """)
+    else:
+        st.warning("Likidite karşılaştırma verisi alınamadı")
+    
+    st.divider()
+    
+    # ==================== GETİRİ EĞRİSİ ====================
+    st.subheader("📉 Getiri Eğrisi (10Y - 2Y Spread)")
+    
+    if yield_data:
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            spread = yield_data['spread']
+            inverted = yield_data['inverted']
+            
+            if inverted:
+                spread_status = "🔴 TERS"
+                spread_color = "#FF1744"
+            elif spread < 0.5:
+                spread_status = "🟡 DÜZLEŞEN"
+                spread_color = "#FF9800"
+            else:
+                spread_status = "🟢 NORMAL"
+                spread_color = "#00C853"
+            
+            st.markdown(f"""
+            <div style="text-align: center; padding: 15px; background: {spread_color}22; border-radius: 10px; border: 2px solid {spread_color};">
+                <h2 style="color: {spread_color}; margin: 0;">{spread:.2f}%</h2>
+                <p style="color: {spread_color}; margin: 0;">{spread_status}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col2:
+            st.metric("📈 10Y Getiri", f"%{yield_data['us10y']:.2f}")
+        
+        with col3:
+            st.metric("📊 2Y Getiri", f"%{yield_data['us02y']:.2f}")
+        
+        # Spread geçmişi grafiği
+        if yield_data.get('history'):
+            import pandas as pd
+            spread_df = pd.DataFrame(yield_data['history'])
+            
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=spread_df['date'],
+                y=spread_df['spread'],
+                mode='lines',
+                fill='tozeroy',
+                line=dict(color='#4CAF50' if not inverted else '#FF1744', width=2),
+                name='10Y-2Y Spread'
+            ))
+            
+            # Sıfır çizgisi
+            fig.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Inversiyon")
+            
+            fig.update_layout(
+                template="plotly_dark",
+                height=250,
+                margin=dict(l=0, r=0, t=20, b=20),
+                yaxis_title="Spread (%)"
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with st.expander("🚨 Resesyon Alarmı Nedir?"):
+            st.write("""
+            **Getiri eğrisi** uzun vadeli faizler (10Y) ile kısa vadeli faizler (2Y) arasındaki farktır.
+            
+            **Normal eğri (pozitif spread)**: Uzun vade > Kısa vade → Ekonomi sağlıklı
+            
+            **Ters eğri (negatif spread)**: Uzun vade < Kısa vade → **Resesyon sinyali**
+            
+            Tarihsel olarak, ters getiri eğrisi 6-18 ay içinde resesyonu önceden tahmin etmiştir.
+            """)
+    else:
+        st.warning(f"Getiri eğrisi verisi alınamadı: {yield_err}")
 
 
 
