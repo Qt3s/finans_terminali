@@ -758,10 +758,25 @@ def render_onchain_page():
     
     if protocol_data:
         # Temel Metrikler - tip kontrolü ile
-        try:
-            tvl = float(protocol_data.get('tvl', 0) or 0)
-        except (TypeError, ValueError):
-            tvl = 0.0
+        # TVL birden fazla formatta gelebilir
+        raw_tvl = protocol_data.get('tvl', 0)
+        
+        if isinstance(raw_tvl, list) and len(raw_tvl) > 0:
+            # Liste formatı - son değeri al
+            last_item = raw_tvl[-1]
+            if isinstance(last_item, dict):
+                tvl = float(last_item.get('totalLiquidityUSD', 0) or last_item.get('tvl', 0) or 0)
+            else:
+                tvl = float(last_item) if last_item else 0.0
+        elif isinstance(raw_tvl, (int, float)):
+            tvl = float(raw_tvl)
+        else:
+            # currentChainTvls'den topla
+            current_tvls = protocol_data.get('currentChainTvls', {})
+            if current_tvls and isinstance(current_tvls, dict):
+                tvl = sum(float(v) for v in current_tvls.values() if isinstance(v, (int, float)))
+            else:
+                tvl = 0.0
         
         try:
             mcap = float(protocol_data.get('mcap', 0) or 0)
@@ -935,8 +950,18 @@ def render_onchain_page():
             st.divider()
             st.subheader("💰 Hazine (Treasury) Durumu")
             
-            treasury_tvl = treasury_data.get('tvl', 0)
-            st.metric("Toplam Hazine", f"${treasury_tvl/1e6:.1f}M" if treasury_tvl else "Veri yok")
+            raw_treasury = treasury_data.get('tvl', 0)
+            if isinstance(raw_treasury, (int, float)):
+                treasury_tvl = float(raw_treasury)
+            elif isinstance(raw_treasury, dict):
+                treasury_tvl = sum(float(v) for v in raw_treasury.values() if isinstance(v, (int, float)))
+            else:
+                treasury_tvl = 0
+            
+            if treasury_tvl > 0:
+                st.metric("Toplam Hazine", f"${treasury_tvl/1e6:.1f}M")
+            else:
+                st.metric("Toplam Hazine", "Veri yok")
     else:
         st.error(f"Protokol verisi alınamadı: {proto_err}")
         st.info("💡 DeFiLlama API'sine bağlanırken sorun oluştu. Lütfen tekrar deneyin.")
