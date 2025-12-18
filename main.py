@@ -179,109 +179,6 @@ def merge_time_series(dfs: list, how: str = 'outer', fill_method: str = 'ffill_i
     return result
 
 
-# ==================== BULK YFINANCE DATA (403 Koruma) ====================
-
-@st.cache_data(ttl=3600, show_spinner=False)  # 1 saat cache
-def fetch_bulk_yfinance_data():
-    """
-    Tüm yfinance verilerini tek seferde çeker.
-    403 Fair-Use hatasını önlemek için bulk download.
-    """
-    import yfinance as yf
-    import pandas as pd
-    
-    # Tek seferde çekilecek tüm semboller
-    symbols = [
-        # Makro
-        'DX-Y.NYB',  # DXY
-        '^VIX',      # VIX
-        '^TNX',      # US 10Y
-        'GC=F',      # Gold
-        'CL=F',      # Oil
-        'JPY=X',     # USD/JPY
-        '^GSPC',     # S&P 500
-        '^IXIC',     # Nasdaq
-        # Kripto
-        'BTC-USD',
-        'ETH-USD',
-        # ETF Proxies
-        'TLT',       # Treasury
-        'HYG',       # High Yield
-        'LQD',       # Investment Grade
-        'BDRY',      # Baltic Dry
-        'KBE',       # Bank ETF
-    ]
-    
-    result = {}
-    
-    try:
-        # Bulk download - tek API çağrısı
-        data = yf.download(
-            symbols,
-            period='60d',
-            interval='1d',
-            group_by='ticker',
-            auto_adjust=True,
-            threads=True,
-            progress=False
-        )
-        
-        for symbol in symbols:
-            try:
-                if symbol in data.columns.get_level_values(0):
-                    df = data[symbol].dropna()
-                    if not df.empty and len(df) > 1:
-                        last_close = df['Close'].iloc[-1]
-                        prev_close = df['Close'].iloc[-2]
-                        change_pct = ((last_close - prev_close) / prev_close) * 100
-                        
-                        result[symbol] = {
-                            'value': float(last_close),
-                            'change': float(change_pct),
-                            'high': float(df['High'].iloc[-1]) if 'High' in df else last_close,
-                            'low': float(df['Low'].iloc[-1]) if 'Low' in df else last_close,
-                            'history': df['Close'].tail(30).tolist()
-                        }
-            except Exception:
-                continue
-        
-        return result, None
-        
-    except Exception as e:
-        return {}, str(e)
-
-
-def get_cached_yf_data(symbol: str):
-    """Önbellekten yfinance verisi al."""
-    data, error = fetch_bulk_yfinance_data()
-    
-    if error:
-        return None, error
-    
-    if symbol in data:
-        return data[symbol], None
-    
-    # Symbol mapping
-    symbol_map = {
-        'DXY': 'DX-Y.NYB',
-        'VIX': '^VIX',
-        'US10Y': '^TNX',
-        'Gold': 'GC=F',
-        'Oil': 'CL=F',
-        'USDJPY': 'JPY=X',
-        'SP500': '^GSPC',
-        'Nasdaq': '^IXIC',
-        'BTC': 'BTC-USD',
-        'ETH': 'ETH-USD'
-    }
-    
-    mapped = symbol_map.get(symbol)
-    if mapped and mapped in data:
-        return data[mapped], None
-    
-    return None, f"Symbol bulunamadı: {symbol}"
-
-
 # ==================== VERİ ÇEKİCİ FONKSİYONLAR ====================
 
 def get_exchange_instance(config):
@@ -429,37 +326,52 @@ def fetch_ethereum_data():
 
 @st.cache_data(ttl=21600, show_spinner=False)  # 6 saat cache
 def fetch_macro_data():
-    """Genişletilmiş makro ekonomi verileri - bulk cache kullanır."""
+    """Genişletilmiş makro ekonomi verileri."""
+    import yfinance as yf
     
-    # Bulk cache'den veri al
-    bulk_data, error = fetch_bulk_yfinance_data()
-    
-    if error or not bulk_data:
-        return {}
-    
-    symbol_map = {
-        'DXY': 'DX-Y.NYB',
-        'US10Y': '^TNX',
-        'VIX': '^VIX',
-        'Gold': 'GC=F',
-        'Oil': 'CL=F',
-        'USDJPY': 'JPY=X',
-        'TLT': 'TLT',
+    symbols = {
+        'DXY': 'DX-Y.NYB',      # Dolar Endeksi
+        'US10Y': '^TNX',         # ABD 10Y Tahvil
+        'US02Y': '^IRX',         # ABD 2Y (yaklaşık - 13 hafta)
+        'VIX': '^VIX',           # Korku Endeksi
+        'Gold': 'GC=F',          # Altın
+        'Silver': 'SI=F',        # Gümüş
+        'Oil': 'CL=F',           # WTI Petrol
+        'USDJPY': 'JPY=X',       # USD/JPY (Carry Trade)
+        'TLT': 'TLT',            # Uzun vadeli tahvil ETF (likidite proxy)
     }
     
     results = {}
     
-    for name, symbol in symbol_map.items():
-        if symbol in bulk_data:
-            data = bulk_data[symbol]
-            results[name] = {
-                'value': data['value'],
-                'change': data['change'],
-                'change_5d': data['change'],  # Aynı veri
-                'change_30d': data['change'],
-                'history': data.get('history', [])
-            }
-        else:
+    for name, symbol in symbols.items():
+        try:
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period='60d')
+            
+            if not hist.empty:
+                # Float32 optimizasyonu
+                last = float(hist['Close'].iloc[-1])
+                prev = float(hist['Close'].iloc[-2]) if len(hist) > 1 else last
+                change = ((last - prev) / prev) * 100 if prev != 0 else 0
+                
+                # 5 günlük değişim
+                prev_5d = float(hist['Close'].iloc[-5]) if len(hist) >= 5 else float(hist['Close'].iloc[0])
+                change_5d = ((last - prev_5d) / prev_5d) * 100 if prev_5d != 0 else 0
+                
+                # 30 günlük değişim
+                prev_30d = float(hist['Close'].iloc[0]) if len(hist) >= 20 else float(hist['Close'].iloc[0])
+                change_30d = ((last - prev_30d) / prev_30d) * 100 if prev_30d != 0 else 0
+                
+                results[name] = {
+                    'value': last,
+                    'change': change,
+                    'change_5d': change_5d,
+                    'change_30d': change_30d,
+                    'history': hist[['Close']].astype('float32')  # Sadece Close, float32
+                }
+            else:
+                results[name] = None
+        except Exception as e:
             results[name] = None
     
     return results
