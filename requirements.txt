@@ -1,7 +1,17 @@
-streamlit>=1.28.0
-ccxt>=4.0.0
-yfinance>=0.2.30
-web3>=6.0.0
-plotly>=5.18.0
-pandas>=2.0.0
+# Finans Terminali - Buffett Edition
+# Python 3.10+ gerektirir
 
+# Core
+streamlit>=1.29.0
+pandas>=2.0.0
+plotly>=5.18.0
+requests>=2.31.0
+
+# Kripto Data
+ccxt>=4.0.0
+
+# Hisse Senedi Data
+yfinance>=0.2.33
+
+# Blockchain / On-Chain
+web3>=6.11.0
