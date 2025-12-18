@@ -229,14 +229,17 @@ def fetch_ethereum_data():
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_macro_data():
-    """Makro ekonomi verileri: DXY, Bonds, Gold, VIX."""
+    """Genişletilmiş makro ekonomi verileri."""
     import yfinance as yf
     
     symbols = {
-        'DXY': 'DX-Y.NYB',
-        'US10Y': '^TNX',
-        'Gold': 'GC=F',
-        'VIX': '^VIX'
+        'DXY': 'DX-Y.NYB',      # Dolar Endeksi
+        'US10Y': '^TNX',         # ABD 10Y Tahvil
+        'VIX': '^VIX',           # Korku Endeksi
+        'Gold': 'GC=F',          # Altın
+        'Silver': 'SI=F',        # Gümüş
+        'Oil': 'CL=F',           # WTI Petrol
+        'USDJPY': 'JPY=X',       # USD/JPY (Carry Trade)
     }
     
     results = {}
@@ -244,16 +247,21 @@ def fetch_macro_data():
     for name, symbol in symbols.items():
         try:
             ticker = yf.Ticker(symbol)
-            hist = ticker.history(period='5d')
+            hist = ticker.history(period='30d')
             
             if not hist.empty:
                 last = hist['Close'].iloc[-1]
                 prev = hist['Close'].iloc[-2] if len(hist) > 1 else last
                 change = ((last - prev) / prev) * 100 if prev != 0 else 0
                 
+                # 5 günlük değişim
+                prev_5d = hist['Close'].iloc[-5] if len(hist) >= 5 else hist['Close'].iloc[0]
+                change_5d = ((last - prev_5d) / prev_5d) * 100 if prev_5d != 0 else 0
+                
                 results[name] = {
                     'value': last,
                     'change': change,
+                    'change_5d': change_5d,
                     'history': hist
                 }
             else:
@@ -262,6 +270,145 @@ def fetch_macro_data():
             results[name] = None
     
     return results
+
+
+def calculate_risk_score(macro_data: dict) -> tuple:
+    """
+    Risk İştahı Skoru (0-100) hesaplar.
+    
+    RISK-ON faktörler (skoru artırır):
+    - DXY düşük (<100) → Zayıf dolar, likidite bol
+    - VIX düşük (<20) → Piyasa sakin
+    - Petrol yükseliyor → Ekonomik aktivite güçlü
+    
+    RISK-OFF faktörler (skoru düşürür):
+    - VIX yüksek (>30) → Korku yüksek
+    - JPY güçleniyor (düşük USDJPY) → Carry trade çözülüyor
+    - Altın yükseliyor → Güvenli liman talebi
+    
+    Returns:
+        (score, factors): Skor ve faktör listesi
+    """
+    score = 50  # Nötr başla
+    factors = []
+    
+    # DXY etkisi (-15 to +15)
+    dxy = macro_data.get('DXY')
+    if dxy:
+        dxy_val = dxy['value']
+        if dxy_val < 100:
+            score += 15
+            factors.append(("🟢 Zayıf Dolar", f"DXY: {dxy_val:.1f} < 100"))
+        elif dxy_val > 105:
+            score -= 15
+            factors.append(("🔴 Güçlü Dolar", f"DXY: {dxy_val:.1f} > 105"))
+        else:
+            factors.append(("🟡 Nötr Dolar", f"DXY: {dxy_val:.1f}"))
+    
+    # VIX etkisi (-20 to +20)
+    vix = macro_data.get('VIX')
+    if vix:
+        vix_val = vix['value']
+        if vix_val < 15:
+            score += 20
+            factors.append(("🟢 Düşük Korku", f"VIX: {vix_val:.1f} < 15"))
+        elif vix_val < 20:
+            score += 10
+            factors.append(("🟢 Normal Korku", f"VIX: {vix_val:.1f}"))
+        elif vix_val > 30:
+            score -= 20
+            factors.append(("🔴 Yüksek Korku", f"VIX: {vix_val:.1f} > 30"))
+        elif vix_val > 25:
+            score -= 10
+            factors.append(("🟡 Artan Korku", f"VIX: {vix_val:.1f}"))
+        else:
+            factors.append(("🟡 Orta Korku", f"VIX: {vix_val:.1f}"))
+    
+    # USD/JPY etkisi (-10 to +10) - Carry Trade barometresi
+    usdjpy = macro_data.get('USDJPY')
+    if usdjpy:
+        jpy_val = usdjpy['value']
+        # Yüksek USDJPY = zayıf Yen = risk-on
+        if jpy_val > 155:
+            score += 10
+            factors.append(("🟢 Zayıf Yen", f"USD/JPY: {jpy_val:.1f} (Carry Trade aktif)"))
+        elif jpy_val < 145:
+            score -= 10
+            factors.append(("🔴 Güçlü Yen", f"USD/JPY: {jpy_val:.1f} (Carry Trade çözülüyor)"))
+        else:
+            factors.append(("🟡 Stabil Yen", f"USD/JPY: {jpy_val:.1f}"))
+    
+    # Petrol trendi (-5 to +5)
+    oil = macro_data.get('Oil')
+    if oil:
+        oil_change = oil.get('change_5d', 0)
+        if oil_change > 5:
+            score += 5
+            factors.append(("🟢 Petrol Yükseliyor", f"+{oil_change:.1f}% (Ekonomik aktivite)"))
+        elif oil_change < -5:
+            score -= 5
+            factors.append(("🔴 Petrol Düşüyor", f"{oil_change:.1f}% (Talep endişesi)"))
+    
+    # Altın trendi (-5 to +5)
+    gold = macro_data.get('Gold')
+    if gold:
+        gold_change = gold.get('change_5d', 0)
+        if gold_change > 3:
+            score -= 5
+            factors.append(("🔴 Altın Yükseliyor", f"+{gold_change:.1f}% (Risk-off sinyali)"))
+        elif gold_change < -3:
+            score += 5
+            factors.append(("🟢 Altın Düşüyor", f"{gold_change:.1f}% (Risk-on sinyali)"))
+    
+    return max(0, min(100, score)), factors
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_correlation_heatmap_data(days: int = 30):
+    """Varlıklar arası korelasyon matrisi için veri çeker."""
+    import yfinance as yf
+    import numpy as np
+    
+    assets = {
+        'BTC': 'BTC-USD',
+        'ETH': 'ETH-USD',
+        'DXY': 'DX-Y.NYB',
+        'VIX': '^VIX',
+        'Gold': 'GC=F',
+        'Oil': 'CL=F',
+        'JPY': 'JPY=X',
+        'SP500': '^GSPC'
+    }
+    
+    try:
+        returns_data = {}
+        
+        for name, symbol in assets.items():
+            try:
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period=f'{days}d')
+                
+                if not hist.empty and len(hist) > 5:
+                    # Günlük getiri
+                    returns = hist['Close'].pct_change().dropna()
+                    returns.index = returns.index.date
+                    returns_data[name] = returns
+            except:
+                continue
+        
+        if len(returns_data) < 3:
+            return None, "Yeterli veri yok"
+        
+        # DataFrame oluştur
+        import pandas as pd
+        df = pd.DataFrame(returns_data)
+        
+        # Korelasyon matrisi
+        corr_matrix = df.corr()
+        
+        return corr_matrix, None
+    except Exception as e:
+        return None, str(e)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -987,180 +1134,169 @@ def render_onchain_page():
 
 
 def render_macro_page():
-    """Makro Ekonomi Sayfası - Piyasa Pusulası"""
-    st.title("📊 Makro Ekonomi")
-    st.caption("Küresel piyasa göstergeleri ve korelasyon analizi")
+    """Makro Ekonomi Sayfası - Risk Pusulası"""
+    st.title("📊 Makro Ekonomi - Risk Pusulası")
+    st.caption("Küresel piyasa göstergeleri ve yatırım karar desteği")
     st.divider()
     
     # Makro verileri çek
     with st.spinner("Makro veriler yükleniyor..."):
         macro_data = fetch_macro_data()
     
-    # Metrikler
+    # ==================== RİSK PUSULASI ====================
+    st.subheader("🧭 Risk Pusulası")
+    
+    risk_score, risk_factors = calculate_risk_score(macro_data)
+    
+    # Risk durumu kartı
+    if risk_score > 70:
+        risk_mode = "RISK-ON"
+        risk_color = "#00C853"
+        risk_message = "Piyasa RISK-ON modunda. Likidite artıyor, riskli varlıklar (Kripto/Hisse) için uygun ortam."
+        risk_emoji = "🟢"
+    elif risk_score < 40:
+        risk_mode = "RISK-OFF"
+        risk_color = "#FF1744"
+        risk_message = "Piyasa RISK-OFF modunda. Güvenli limanlara (Nakit/Altın) geçiş mantıklı görünüyor."
+        risk_emoji = "🔴"
+    else:
+        risk_mode = "NÖTR"
+        risk_color = "#FF9800"
+        risk_message = "Piyasa karışık sinyaller veriyor. Dikkatli olun ve pozisyon boyutunu küçük tutun."
+        risk_emoji = "🟡"
+    
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.markdown(f"""
+        <div style="text-align: center; padding: 25px; background: linear-gradient(135deg, {risk_color}22, {risk_color}44); border-radius: 15px; border: 3px solid {risk_color};">
+            <h1 style="color: {risk_color}; margin: 0; font-size: 3.5rem;">{risk_score}</h1>
+            <h3 style="color: {risk_color}; margin: 5px 0;">{risk_emoji} {risk_mode}</h3>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        if risk_score > 70:
+            st.success(risk_message)
+        elif risk_score < 40:
+            st.error(risk_message)
+        else:
+            st.warning(risk_message)
+        
+        # Faktör detayları
+        with st.expander("📋 Skor Faktörleri"):
+            for factor, detail in risk_factors:
+                st.write(f"**{factor}**: {detail}")
+    
+    st.divider()
+    
+    # ==================== MAKRO METRİKLER ====================
     st.subheader("🌍 Küresel Göstergeler")
+    
+    # İlk satır: Para & Tahvil
     cols = st.columns(4)
     
-    # DXY
     with cols[0]:
         if macro_data.get('DXY'):
             dxy = macro_data['DXY']
-            st.metric(
-                "💵 DXY (Dolar)",
-                f"{dxy['value']:.2f}",
-                f"{dxy['change']:+.2f}%"
-            )
+            st.metric("💵 DXY (Dolar)", f"{dxy['value']:.2f}", f"{dxy['change']:+.2f}%")
         else:
             st.metric("💵 DXY", "—")
     
-    # US 10Y
     with cols[1]:
         if macro_data.get('US10Y'):
             bonds = macro_data['US10Y']
-            st.metric(
-                "📜 ABD 10Y Tahvil",
-                f"%{bonds['value']:.2f}",
-                f"{bonds['change']:+.2f}%"
-            )
+            st.metric("📜 ABD 10Y Tahvil", f"%{bonds['value']:.2f}", f"{bonds['change']:+.2f}%")
         else:
             st.metric("📜 ABD 10Y", "—")
     
-    # Gold
     with cols[2]:
-        if macro_data.get('Gold'):
-            gold = macro_data['Gold']
-            st.metric(
-                "🥇 Altın",
-                f"${gold['value']:,.0f}",
-                f"{gold['change']:+.2f}%"
-            )
-        else:
-            st.metric("🥇 Altın", "—")
-    
-    # VIX
-    with cols[3]:
         if macro_data.get('VIX'):
             vix = macro_data['VIX']
             vix_status = "🟢" if vix['value'] < 20 else "🟡" if vix['value'] < 30 else "🔴"
-            st.metric(
-                f"😱 VIX {vix_status}",
-                f"{vix['value']:.1f}",
-                f"{vix['change']:+.2f}%"
-            )
+            st.metric(f"😱 VIX {vix_status}", f"{vix['value']:.1f}", f"{vix['change']:+.2f}%")
         else:
             st.metric("😱 VIX", "—")
     
+    with cols[3]:
+        if macro_data.get('USDJPY'):
+            jpy = macro_data['USDJPY']
+            st.metric("🇯🇵 USD/JPY", f"{jpy['value']:.2f}", f"{jpy['change']:+.2f}%")
+        else:
+            st.metric("🇯🇵 USD/JPY", "—")
+    
+    # İkinci satır: Emtia
+    cols2 = st.columns(4)
+    
+    with cols2[0]:
+        if macro_data.get('Gold'):
+            gold = macro_data['Gold']
+            st.metric("🥇 Altın", f"${gold['value']:,.0f}", f"{gold['change']:+.2f}%")
+        else:
+            st.metric("🥇 Altın", "—")
+    
+    with cols2[1]:
+        if macro_data.get('Silver'):
+            silver = macro_data['Silver']
+            st.metric("🥈 Gümüş", f"${silver['value']:.2f}", f"{silver['change']:+.2f}%")
+        else:
+            st.metric("🥈 Gümüş", "—")
+    
+    with cols2[2]:
+        if macro_data.get('Oil'):
+            oil = macro_data['Oil']
+            st.metric("�️ WTI Petrol", f"${oil['value']:.2f}", f"{oil['change']:+.2f}%")
+        else:
+            st.metric("🛢️ WTI Petrol", "—")
+    
+    with cols2[3]:
+        # Gold/Silver oranı
+        if macro_data.get('Gold') and macro_data.get('Silver'):
+            gold_val = macro_data['Gold']['value']
+            silver_val = macro_data['Silver']['value']
+            ratio = gold_val / silver_val if silver_val > 0 else 0
+            ratio_status = "🟢 Ucuz" if ratio > 80 else "🔴 Pahalı" if ratio < 60 else "🟡"
+            st.metric(f"Au/Ag {ratio_status}", f"{ratio:.1f}x")
+        else:
+            st.metric("Au/Ag Oranı", "—")
+    
     st.divider()
     
-    # Korelasyon Analizi
-    st.subheader("📈 DXY - Bitcoin Korelasyonu")
-    
-    col1, col2 = st.columns([3, 5])
-    
-    with col1:
-        crypto_options = {"Bitcoin": "BTC-USD", "Ethereum": "ETH-USD", "Gold": "GC=F"}
-        selected_asset = st.selectbox("Karşılaştır", list(crypto_options.keys()))
-    
-    asset_symbol = crypto_options[selected_asset]
+    # ==================== KORELASYON ISIL HARİTASI ====================
+    st.subheader("🔥 Korelasyon Isı Haritası")
+    st.caption("Son 30 gün - BTC, ETH, DXY, VIX, Gold, Oil, JPY, S&P500")
     
     with st.spinner("Korelasyon hesaplanıyor..."):
-        corr_data, corr_error = fetch_correlation_data(asset_symbol, 90)
+        corr_matrix, corr_error = fetch_correlation_heatmap_data(30)
     
-    if corr_data:
-        col1, col2 = st.columns([1, 3])
+    if corr_matrix is not None:
+        import plotly.express as px
         
-        with col1:
-            corr_value = corr_data['correlation']
-            
-            if corr_value < -0.3:
-                corr_color = "#00C853"
-                corr_text = "Negatif (BTC için olumlu)"
-            elif corr_value > 0.3:
-                corr_color = "#FF1744"
-                corr_text = "Pozitif (BTC için olumsuz)"
-            else:
-                corr_color = "#FF9800"
-                corr_text = "Nötr"
-            
-            st.markdown(f"""
-            <div style="text-align: center; padding: 15px; background: linear-gradient(135deg, {corr_color}22, {corr_color}44); border-radius: 10px; border: 2px solid {corr_color};">
-                <h2 style="color: {corr_color}; margin: 0;">{corr_value:.2f}</h2>
-                <p style="color: {corr_color}; margin: 0; font-size: 0.9rem;">{corr_text}</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.caption(f"Son {corr_data['days']} gün verisi")
+        fig = px.imshow(
+            corr_matrix,
+            text_auto='.2f',
+            color_continuous_scale='RdBu_r',
+            zmin=-1,
+            zmax=1,
+            aspect='auto'
+        )
         
-        with col2:
-            # Dual axis chart
-            fig = go.Figure()
-            
-            dxy_hist = corr_data['dxy_data']
-            crypto_hist = corr_data['crypto_data']
-            
-            fig.add_trace(go.Scatter(
-                x=dxy_hist.index,
-                y=dxy_hist['Close'],
-                name='DXY',
-                line=dict(color='#2196F3', width=2),
-                yaxis='y'
-            ))
-            
-            fig.add_trace(go.Scatter(
-                x=crypto_hist.index,
-                y=crypto_hist['Close'],
-                name=selected_asset,
-                line=dict(color='#FF9800', width=2),
-                yaxis='y2'
-            ))
-            
-            fig.update_layout(
-                template="plotly_dark",
-                height=300,
-                margin=dict(l=0, r=0, t=20, b=20),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                yaxis=dict(title="DXY", side="left"),
-                yaxis2=dict(title=selected_asset, side="right", overlaying="y")
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
+        fig.update_layout(
+            template="plotly_dark",
+            height=400,
+            margin=dict(l=0, r=0, t=30, b=0),
+            coloraxis_colorbar=dict(title="r")
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        with st.expander("📊 Korelasyon Yorumu"):
+            st.write("• **BTC-DXY**: Negatif = zayıf dolar BTC'ye olumlu")
+            st.write("• **BTC-VIX**: Korku artınca BTC genellikle düşer")
+            st.write("• **Gold-DXY**: Genellikle negatif korelasyon")
     else:
         st.warning(f"Korelasyon verisi alınamadı: {corr_error}")
-    
-    st.divider()
-    
-    # Piyasa Yorumu
-    st.subheader("💡 Piyasa Pusulası")
-    
-    insights = []
-    
-    if macro_data.get('DXY'):
-        dxy_val = macro_data['DXY']['value']
-        if dxy_val > 105:
-            insights.append("🔴 **Güçlü Dolar**: Risk iştahı düşük, kripto için baskı.")
-        elif dxy_val < 100:
-            insights.append("🟢 **Zayıf Dolar**: Risk iştahı yüksek, kripto için olumlu.")
-        else:
-            insights.append("🟡 **Nötr Dolar**: Piyasa yön arıyor.")
-    
-    if macro_data.get('VIX'):
-        vix_val = macro_data['VIX']['value']
-        if vix_val > 30:
-            insights.append("🔴 **Yüksek Korku**: Volatilite yüksek, dikkatli olun.")
-        elif vix_val < 15:
-            insights.append("🟢 **Düşük Korku**: Piyasa sakin, risk alınabilir.")
-    
-    if macro_data.get('US10Y'):
-        bond_val = macro_data['US10Y']['value']
-        if bond_val > 4.5:
-            insights.append("🔴 **Yüksek Faiz**: Hisse ve kripto için baskı.")
-        elif bond_val < 3.5:
-            insights.append("🟢 **Düşük Faiz**: Risk varlıkları için olumlu.")
-    
-    if insights:
-        for insight in insights:
-            st.write(insight)
-    else:
-        st.info("Piyasa verileri yüklenemedi.")
+
 
 
 def render_settings_page():
