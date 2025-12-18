@@ -2705,12 +2705,285 @@ def render_settings_page():
         st.success("Önbellek temizlendi!")
 
 
-# ==================== SIDEBAR NAVİGASYON ====================
+def render_ai_page():
+    """Yapay Zeka Tahmin Sayfası - XGBoost + SHAP"""
+    st.title("🤖 Yapay Zeka Tahmin")
+    st.caption("XGBoost modeli ile BTC fiyat yönü tahmini ve SHAP açıklanabilirlik")
+    st.divider()
+    
+    # ==================== VERİ HAZIRLAMA ====================
+    st.subheader("📊 Model Veri Seti")
+    
+    with st.spinner("Veri hazırlanıyor..."):
+        try:
+            import yfinance as yf
+            import numpy as np
+            import pandas as pd
+            
+            # BTC verisini çek
+            btc = yf.Ticker('BTC-USD')
+            btc_hist = btc.history(period='2y')
+            
+            if btc_hist.empty or len(btc_hist) < 200:
+                st.warning("⚠️ Eğitim için yeterli veri seti toplanıyor... Daha sonra tekrar deneyin.")
+                return
+            
+            # Feature Engineering
+            df = btc_hist[['Close', 'Volume', 'High', 'Low']].copy()
+            df = df.astype('float32')  # Bellek optimizasyonu
+            
+            # Teknik İndikatörler
+            df['returns'] = df['Close'].pct_change()
+            df['log_returns'] = np.log(df['Close'] / df['Close'].shift(1))
+            df['volatility_20'] = df['returns'].rolling(window=20).std()
+            
+            # RSI
+            delta = df['Close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            df['RSI_14'] = 100 - (100 / (1 + rs))
+            
+            # EMA
+            df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
+            df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
+            df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
+            
+            # EMA Sinyalleri
+            df['ema_signal_20_50'] = (df['EMA_20'] > df['EMA_50']).astype(int)
+            df['ema_signal_50_200'] = (df['EMA_50'] > df['EMA_200']).astype(int)
+            
+            # Price momentum
+            df['momentum_5'] = df['Close'].pct_change(5)
+            df['momentum_10'] = df['Close'].pct_change(10)
+            df['momentum_20'] = df['Close'].pct_change(20)
+            
+            # Volatility
+            df['high_low_ratio'] = df['High'] / df['Low']
+            df['volume_change'] = df['Volume'].pct_change()
+            
+            # Target: 5 periyot sonraki getiri
+            df['future_return'] = df['Close'].shift(-5) / df['Close'] - 1
+            df['target'] = (df['future_return'] > 0).astype(int)
+            
+            # NaN temizliği
+            df = df.dropna()
+            
+            # Session state'e makro veriler varsa ekle
+            if 'master_features_final' in st.session_state:
+                macro_features = st.session_state['master_features_final']
+                for key, value in macro_features.items():
+                    df[f'macro_{key}'] = float(value)
+            
+            st.success(f"✅ {len(df)} satır veri hazırlandı ({df.shape[1]} feature)")
+            
+            # Feature listesi
+            feature_cols = [col for col in df.columns if col not in ['Close', 'Volume', 'High', 'Low', 'future_return', 'target']]
+            
+        except Exception as e:
+            st.error(f"Veri hazırlama hatası: {str(e)}")
+            return
+    
+    st.divider()
+    
+    # ==================== MODEL EĞİTİMİ ====================
+    st.subheader("🧠 XGBoost Model Eğitimi")
+    
+    # Cache'de model var mı kontrol et
+    model_trained = 'xgb_model' in st.session_state and st.session_state.xgb_model is not None
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        if model_trained:
+            st.success("✅ Model hazır (cache'de)")
+        else:
+            st.info("Model henüz eğitilmemiş")
+    
+    with col2:
+        train_button = st.button("🚀 Modeli Eğit", type="primary")
+    
+    if train_button or not model_trained:
+        with st.spinner("Model eğitiliyor... (Bu işlem 30-60 saniye sürebilir)"):
+            try:
+                from xgboost import XGBClassifier
+                from sklearn.model_selection import train_test_split
+                from sklearn.metrics import accuracy_score, classification_report
+                
+                # Feature ve target ayır
+                X = df[feature_cols].astype('float32')
+                y = df['target']
+                
+                # Train/Test split (son 200 test için)
+                train_size = len(X) - 200
+                X_train, X_test = X.iloc[:train_size], X.iloc[train_size:]
+                y_train, y_test = y.iloc[:train_size], y.iloc[train_size:]
+                
+                # XGBoost modeli
+                model = XGBClassifier(
+                    n_estimators=100,
+                    max_depth=5,
+                    learning_rate=0.1,
+                    objective='binary:logistic',
+                    eval_metric='logloss',
+                    use_label_encoder=False,
+                    random_state=42,
+                    n_jobs=-1
+                )
+                
+                model.fit(X_train, y_train)
+                
+                # Accuracy
+                y_pred = model.predict(X_test)
+                accuracy = accuracy_score(y_test, y_pred)
+                
+                # Session state'e kaydet
+                st.session_state.xgb_model = model
+                st.session_state.xgb_features = feature_cols
+                st.session_state.xgb_accuracy = accuracy
+                st.session_state.xgb_X_test = X_test
+                st.session_state.xgb_last_row = X.iloc[-1:]
+                
+                st.success(f"✅ Model eğitildi! Test Accuracy: **{accuracy:.1%}**")
+                
+            except ImportError:
+                st.error("❌ XGBoost kütüphanesi yüklü değil. requirements.txt'i kontrol edin.")
+                return
+            except Exception as e:
+                st.error(f"Model eğitim hatası: {str(e)}")
+                return
+    
+    st.divider()
+    
+    # ==================== TAHMİN ====================
+    if 'xgb_model' in st.session_state and st.session_state.xgb_model is not None:
+        st.subheader("🎯 Güncel Tahmin")
+        
+        model = st.session_state.xgb_model
+        last_row = st.session_state.xgb_last_row
+        
+        # Tahmin yap
+        prediction = model.predict(last_row)[0]
+        proba = model.predict_proba(last_row)[0]
+        
+        bull_prob = proba[1] * 100  # Yükseliş olasılığı
+        
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            # Gauge Chart
+            if bull_prob >= 60:
+                color = "#00C853"
+                signal = "📈 YÜKSELİŞ"
+            elif bull_prob <= 40:
+                color = "#FF1744"
+                signal = "📉 DÜŞÜŞ"
+            else:
+                color = "#FF9800"
+                signal = "➡️ NÖTR"
+            
+            st.markdown(f"""
+            <div style="text-align: center; padding: 30px; background: linear-gradient(135deg, {color}22, {color}44); border-radius: 20px; border: 4px solid {color};">
+                <h1 style="color: {color}; margin: 0; font-size: 4rem;">{bull_prob:.0f}%</h1>
+                <h2 style="color: {color}; margin: 10px 0;">{signal}</h2>
+                <p style="color: #888; margin: 0;">5 Periyot Sonrası</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.caption(f"Model Accuracy: {st.session_state.xgb_accuracy:.1%}")
+        
+        with col2:
+            # SHAP Açıklanabilirlik
+            st.write("**📊 SHAP Feature Importance**")
+            
+            try:
+                import shap
+                
+                # SHAP değerleri hesapla
+                explainer = shap.TreeExplainer(model)
+                shap_values = explainer.shap_values(last_row)
+                
+                # En önemli 10 feature
+                feature_importance = pd.DataFrame({
+                    'feature': st.session_state.xgb_features,
+                    'importance': np.abs(shap_values[0])
+                }).sort_values('importance', ascending=False).head(10)
+                
+                # Plotly bar chart
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=feature_importance['importance'],
+                    y=feature_importance['feature'],
+                    orientation='h',
+                    marker=dict(color='#2196F3')
+                ))
+                
+                fig.update_layout(
+                    template="plotly_dark",
+                    height=300,
+                    margin=dict(l=0, r=0, t=20, b=20),
+                    xaxis_title="SHAP Importance",
+                    yaxis=dict(autorange="reversed")
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+            except ImportError:
+                st.warning("SHAP kütüphanesi yüklü değil. Feature importance gösterilemiyor.")
+                
+                # Fallback: XGBoost built-in importance
+                importance = model.feature_importances_
+                top_features = pd.DataFrame({
+                    'feature': st.session_state.xgb_features,
+                    'importance': importance
+                }).sort_values('importance', ascending=False).head(10)
+                
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=top_features['importance'],
+                    y=top_features['feature'],
+                    orientation='h',
+                    marker=dict(color='#FF9800')
+                ))
+                
+                fig.update_layout(
+                    template="plotly_dark",
+                    height=300,
+                    margin=dict(l=0, r=0, t=20, b=20),
+                    xaxis_title="Feature Importance (XGBoost)",
+                    yaxis=dict(autorange="reversed")
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"SHAP hesaplama hatası: {str(e)}")
+        
+        st.divider()
+        
+        # Model detayları
+        with st.expander("🔍 Model Detayları"):
+            st.write(f"**Eğitim Veri Boyutu**: {len(df) - 200} satır")
+            st.write(f"**Test Veri Boyutu**: 200 satır")
+            st.write(f"**Feature Sayısı**: {len(st.session_state.xgb_features)}")
+            st.write(f"**Target**: 5 periyot sonraki yön (0: Düşüş, 1: Yükseliş)")
+            
+            st.divider()
+            st.write("**Kullanılan Features:**")
+            st.write(", ".join(st.session_state.xgb_features[:15]) + "...")
+        
+        # Uyarı
+        st.warning("⚠️ Bu tahminler yalnızca bilgilendirme amaçlıdır ve yatırım tavsiyesi değildir. Model geçmiş verilerle eğitilmiştir ve gelecek performansı garanti etmez.")
+    
+    else:
+        st.info("Tahmin yapmak için önce modeli eğitin.")
+
+
+
 
 def render_sidebar():
     """Sidebar navigasyon"""
     st.sidebar.title("📊 Finans Terminali")
-    st.sidebar.caption("Buffett Edition v3.0")
+    st.sidebar.caption("Buffett Edition v3.0 + AI")
     st.sidebar.divider()
     
     pages = [
@@ -2719,6 +2992,7 @@ def render_sidebar():
         '📈 Hisse Senedi',
         '🔍 On-Chain Bilanço',
         '📊 Makro Ekonomi',
+        '🤖 AI Tahmin',
         '⚙️ Ayarlar'
     ]
     
@@ -2747,6 +3021,8 @@ def main():
         render_onchain_page()
     elif selected_page == '📊 Makro Ekonomi':
         render_macro_page()
+    elif selected_page == '🤖 AI Tahmin':
+        render_ai_page()
     elif selected_page == '⚙️ Ayarlar':
         render_settings_page()
     
