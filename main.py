@@ -2978,6 +2978,327 @@ def render_ai_page():
         st.info("Tahmin yapmak için önce modeli eğitin.")
 
 
+# ==================== BACKTEST ENGINE ====================
+
+def run_backtest(predictions: np.ndarray, prices: np.ndarray, fee: float = 0.001) -> dict:
+    """
+    Vectorized Backtest Engine.
+    
+    Args:
+        predictions: Model tahminleri (0: Sat, 1: Al)
+        prices: Fiyat serisi
+        fee: İşlem başına komisyon (default: %0.1)
+    
+    Returns:
+        dict: Backtest sonuçları
+    """
+    import numpy as np
+    
+    n = len(predictions)
+    
+    # Getiriler
+    returns = np.diff(prices) / prices[:-1]
+    
+    # Sinyal değişimlerini bul (alım-satım noktaları)
+    signal_changes = np.diff(predictions)
+    trades = np.sum(np.abs(signal_changes))
+    
+    # Strateji getirileri (sinyal 1 ise long, 0 ise cash)
+    # Sinyal t anında, t+1 getirisini etkiler
+    strategy_returns = predictions[:-1] * returns
+    
+    # Komisyon maliyeti (her işlemde)
+    trade_costs = np.abs(signal_changes) * fee
+    strategy_returns[1:] -= trade_costs  # İlk sinyal öncesi trade yok
+    
+    # Kümülatif getiriler
+    cumulative_strategy = np.cumprod(1 + strategy_returns) - 1
+    cumulative_buyhold = np.cumprod(1 + returns) - 1
+    
+    # Toplam getiriler
+    total_strategy_return = cumulative_strategy[-1] * 100 if len(cumulative_strategy) > 0 else 0
+    total_buyhold_return = cumulative_buyhold[-1] * 100 if len(cumulative_buyhold) > 0 else 0
+    
+    # Sharpe Ratio (yıllıklandırılmış, risk-free rate = 0)
+    daily_std = np.std(strategy_returns)
+    if daily_std > 0:
+        sharpe_ratio = (np.mean(strategy_returns) / daily_std) * np.sqrt(252)
+    else:
+        sharpe_ratio = 0
+    
+    # Max Drawdown
+    cumulative_wealth = np.cumprod(1 + strategy_returns)
+    peak = np.maximum.accumulate(cumulative_wealth)
+    drawdown = (peak - cumulative_wealth) / peak
+    max_drawdown = np.max(drawdown) * 100
+    
+    # Win Rate
+    winning_trades = np.sum(strategy_returns > 0)
+    total_trades = np.sum(strategy_returns != 0)
+    win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+    
+    return {
+        'strategy_returns': strategy_returns,
+        'cumulative_strategy': cumulative_strategy,
+        'cumulative_buyhold': cumulative_buyhold,
+        'total_strategy_return': total_strategy_return,
+        'total_buyhold_return': total_buyhold_return,
+        'sharpe_ratio': sharpe_ratio,
+        'max_drawdown': max_drawdown,
+        'total_trades': int(trades),
+        'win_rate': win_rate,
+        'total_fees': trades * fee * 100
+    }
+
+
+@st.cache_data(ttl=86400, show_spinner=False)  # 1 günlük cache
+def fetch_backtest_data(symbol: str = 'BTC-USD', period: str = '2y'):
+    """Backtest için tarihsel veri çeker."""
+    import yfinance as yf
+    
+    try:
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period=period)
+        
+        if hist.empty:
+            return None, "Veri alınamadı"
+        
+        return hist, None
+    except Exception as e:
+        return None, str(e)
+
+
+def render_backtest_page():
+    """Backtest Sayfası - Strateji Performans Testi"""
+    st.title("📈 Backtest - Strateji Performans")
+    st.caption("XGBoost tahminlerini geçmiş veriler üzerinde test edin")
+    st.divider()
+    
+    # Model kontrolü
+    if 'xgb_model' not in st.session_state or st.session_state.xgb_model is None:
+        st.warning("⚠️ Önce 🤖 AI Tahmin sayfasından modeli eğitin.")
+        st.info("Model eğitildikten sonra bu sayfada backtest yapabilirsiniz.")
+        return
+    
+    model = st.session_state.xgb_model
+    feature_cols = st.session_state.xgb_features
+    
+    st.success(f"✅ Model hazır (Accuracy: {st.session_state.xgb_accuracy:.1%})")
+    
+    st.divider()
+    
+    # ==================== VERİ HAZIRLAMA ====================
+    st.subheader("📊 Backtest Veri Seti")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        symbol = st.selectbox("Sembol", ['BTC-USD', 'ETH-USD'], index=0)
+    
+    with col2:
+        period = st.selectbox("Dönem", ['1y', '2y', '5y'], index=1)
+    
+    with st.spinner("Veri hazırlanıyor..."):
+        hist, error = fetch_backtest_data(symbol, period)
+        
+        if error:
+            st.error(f"Veri hatası: {error}")
+            return
+        
+        try:
+            import numpy as np
+            import pandas as pd
+            
+            # Feature Engineering (AI sayfasıyla aynı)
+            df = hist[['Close', 'Volume', 'High', 'Low']].copy()
+            df = df.astype('float32')
+            
+            df['returns'] = df['Close'].pct_change()
+            df['log_returns'] = np.log(df['Close'] / df['Close'].shift(1))
+            df['volatility_20'] = df['returns'].rolling(window=20).std()
+            
+            # RSI
+            delta = df['Close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            df['RSI_14'] = 100 - (100 / (1 + rs))
+            
+            # EMA
+            df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
+            df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
+            df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
+            
+            df['ema_signal_20_50'] = (df['EMA_20'] > df['EMA_50']).astype(int)
+            df['ema_signal_50_200'] = (df['EMA_50'] > df['EMA_200']).astype(int)
+            
+            df['momentum_5'] = df['Close'].pct_change(5)
+            df['momentum_10'] = df['Close'].pct_change(10)
+            df['momentum_20'] = df['Close'].pct_change(20)
+            
+            df['high_low_ratio'] = df['High'] / df['Low']
+            df['volume_change'] = df['Volume'].pct_change()
+            
+            # Makro features (varsa)
+            if 'master_features_final' in st.session_state:
+                for key, value in st.session_state['master_features_final'].items():
+                    df[f'macro_{key}'] = float(value)
+            
+            df = df.dropna()
+            
+            # Feature'ları kontrol et
+            available_features = [col for col in feature_cols if col in df.columns]
+            missing_features = [col for col in feature_cols if col not in df.columns]
+            
+            if len(available_features) < len(feature_cols) * 0.5:
+                st.error("Yeterli feature bulunamadı. Model uyumsuz.")
+                return
+            
+            # Eksik feature'lara 0 ata
+            for feat in missing_features:
+                df[feat] = 0.0
+            
+            X = df[feature_cols].astype('float32')
+            prices = df['Close'].values
+            
+            st.success(f"✅ {len(df)} gün veri hazırlandı")
+            
+        except Exception as e:
+            st.error(f"Veri hazırlama hatası: {str(e)}")
+            return
+    
+    st.divider()
+    
+    # ==================== BACKTEST ====================
+    st.subheader("🚀 Backtest Çalıştır")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        fee = st.slider("İşlem Komisyonu (%)", 0.0, 0.5, 0.1, 0.05) / 100
+    
+    with col2:
+        run_button = st.button("📊 Backtest Başlat", type="primary")
+    
+    if run_button:
+        with st.spinner("Backtest çalıştırılıyor..."):
+            try:
+                # Tahminleri üret
+                predictions = model.predict(X)
+                
+                # Backtest çalıştır
+                results = run_backtest(predictions, prices, fee)
+                
+                # Session state'e kaydet
+                st.session_state.backtest_results = results
+                st.session_state.backtest_dates = df.index[:-1]  # returns 1 eksik
+                
+                st.success("✅ Backtest tamamlandı!")
+                
+            except Exception as e:
+                st.error(f"Backtest hatası: {str(e)}")
+                return
+    
+    # ==================== SONUÇLAR ====================
+    if 'backtest_results' in st.session_state:
+        results = st.session_state.backtest_results
+        dates = st.session_state.backtest_dates
+        
+        st.divider()
+        st.subheader("📊 Performans Sonuçları")
+        
+        # Metrik kartları
+        metric_cols = st.columns(4)
+        
+        with metric_cols[0]:
+            strat_color = "#00C853" if results['total_strategy_return'] > 0 else "#FF1744"
+            st.markdown(f"""
+            <div style="text-align: center; padding: 15px; background: {strat_color}22; border-radius: 10px; border: 2px solid {strat_color};">
+                <p style="margin: 0; color: #888;">📈 Strateji Getirisi</p>
+                <h2 style="color: {strat_color}; margin: 5px 0;">{results['total_strategy_return']:+.1f}%</h2>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with metric_cols[1]:
+            bh_color = "#00C853" if results['total_buyhold_return'] > 0 else "#FF1744"
+            st.markdown(f"""
+            <div style="text-align: center; padding: 15px; background: {bh_color}22; border-radius: 10px; border: 2px solid {bh_color};">
+                <p style="margin: 0; color: #888;">📊 Al-Tut Getirisi</p>
+                <h2 style="color: {bh_color}; margin: 5px 0;">{results['total_buyhold_return']:+.1f}%</h2>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with metric_cols[2]:
+            sharpe_color = "#00C853" if results['sharpe_ratio'] > 1 else "#FF9800" if results['sharpe_ratio'] > 0 else "#FF1744"
+            st.markdown(f"""
+            <div style="text-align: center; padding: 15px; background: {sharpe_color}22; border-radius: 10px; border: 2px solid {sharpe_color};">
+                <p style="margin: 0; color: #888;">📐 Sharpe Ratio</p>
+                <h2 style="color: {sharpe_color}; margin: 5px 0;">{results['sharpe_ratio']:.2f}</h2>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with metric_cols[3]:
+            dd_color = "#00C853" if results['max_drawdown'] < 20 else "#FF9800" if results['max_drawdown'] < 40 else "#FF1744"
+            st.markdown(f"""
+            <div style="text-align: center; padding: 15px; background: {dd_color}22; border-radius: 10px; border: 2px solid {dd_color};">
+                <p style="margin: 0; color: #888;">📉 Max Drawdown</p>
+                <h2 style="color: {dd_color}; margin: 5px 0;">{results['max_drawdown']:.1f}%</h2>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.divider()
+        
+        # Equity Curve
+        st.subheader("📈 Equity Curve")
+        
+        fig = go.Figure()
+        
+        # Strateji
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=results['cumulative_strategy'] * 100,
+            name='XGBoost Strateji',
+            line=dict(color='#2196F3', width=2)
+        ))
+        
+        # Buy & Hold
+        fig.add_trace(go.Scatter(
+            x=dates,
+            y=results['cumulative_buyhold'] * 100,
+            name='Al-Tut (Buy & Hold)',
+            line=dict(color='#FF9800', width=2)
+        ))
+        
+        fig.add_hline(y=0, line_dash="dash", line_color="gray")
+        
+        fig.update_layout(
+            template="plotly_dark",
+            height=400,
+            margin=dict(l=0, r=0, t=30, b=20),
+            yaxis_title="Kümülatif Getiri (%)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02)
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Detaylı istatistikler
+        with st.expander("📋 Detaylı İstatistikler"):
+            stat_cols = st.columns(3)
+            
+            with stat_cols[0]:
+                st.metric("Toplam İşlem", f"{results['total_trades']}")
+                st.metric("Win Rate", f"{results['win_rate']:.1f}%")
+            
+            with stat_cols[1]:
+                st.metric("Toplam Komisyon", f"{results['total_fees']:.2f}%")
+                st.metric("Net Getiri", f"{results['total_strategy_return'] - results['total_fees']:.1f}%")
+            
+            with stat_cols[2]:
+                excess_return = results['total_strategy_return'] - results['total_buyhold_return']
+                st.metric("Alpha (Aşırı Getiri)", f"{excess_return:+.1f}%")
+        
+        # Uyarı
+        st.warning("⚠️ Geçmiş performans gelecek sonuçları garanti etmez. Bu backtest simülasyonu yalnızca bilgilendirme amaçlıdır.")
 
 
 def render_sidebar():
@@ -2993,6 +3314,7 @@ def render_sidebar():
         '🔍 On-Chain Bilanço',
         '📊 Makro Ekonomi',
         '🤖 AI Tahmin',
+        '📉 Backtest',
         '⚙️ Ayarlar'
     ]
     
@@ -3023,6 +3345,8 @@ def main():
         render_macro_page()
     elif selected_page == '🤖 AI Tahmin':
         render_ai_page()
+    elif selected_page == '📉 Backtest':
+        render_backtest_page()
     elif selected_page == '⚙️ Ayarlar':
         render_settings_page()
     
