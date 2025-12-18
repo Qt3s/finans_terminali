@@ -450,11 +450,30 @@ def calculate_buffett_score(mcap: float, tvl: float, treasury_data: dict = None)
         details.append("⚪ TVL verisi yok")
     
     # 2. Treasury Analizi
-    if treasury_data:
-        try:
-            total_treasury = float(treasury_data.get('tvl', 0) or 0)
-        except (TypeError, ValueError):
-            total_treasury = 0.0
+    if treasury_data and isinstance(treasury_data, dict):
+        total_treasury = 0.0
+        
+        # Farklı treasury formatlarını dene
+        raw_tvl = treasury_data.get('tvl', 0)
+        
+        if isinstance(raw_tvl, (int, float)) and raw_tvl > 0:
+            total_treasury = float(raw_tvl)
+        else:
+            # tokenBreakdowns veya ownTokens içinden topla
+            token_breakdowns = treasury_data.get('tokenBreakdowns', {})
+            if token_breakdowns and isinstance(token_breakdowns, dict):
+                for chain_data in token_breakdowns.values():
+                    if isinstance(chain_data, dict):
+                        for token_data in chain_data.values():
+                            if isinstance(token_data, dict):
+                                total_treasury += float(token_data.get('usdValue', 0) or 0)
+                            elif isinstance(token_data, (int, float)):
+                                total_treasury += float(token_data)
+            
+            # ownTokens kontrolü
+            own_tokens = treasury_data.get('ownTokens', 0)
+            if isinstance(own_tokens, (int, float)):
+                total_treasury += float(own_tokens)
         
         if total_treasury > 100_000_000:  # 100M+
             details.append(f"🟢 Güçlü hazine (${total_treasury/1e6:.0f}M)")
@@ -466,7 +485,7 @@ def calculate_buffett_score(mcap: float, tvl: float, treasury_data: dict = None)
             details.append(f"🔴 Zayıf hazine (${total_treasury/1e6:.0f}M)")
         else:
             score -= 1
-            details.append("⚪ Hazine tutarı bilinmiyor")
+            details.append("⚪ Hazine verisi mevcut değil")
     else:
         score -= 1
         details.append("⚪ Hazine verisi yok")
