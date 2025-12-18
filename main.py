@@ -516,20 +516,41 @@ def render_onchain_page():
         treasury_data, treasury_err = fetch_defillama_treasury(protocol_slug)
     
     if protocol_data:
-        # Temel Metrikler
-        tvl = protocol_data.get('tvl', 0) or 0
-        mcap = protocol_data.get('mcap', 0) or 0
+        # Temel Metrikler - tip kontrolü ile
+        try:
+            tvl = float(protocol_data.get('tvl', 0) or 0)
+        except (TypeError, ValueError):
+            tvl = 0.0
+        
+        try:
+            mcap = float(protocol_data.get('mcap', 0) or 0)
+        except (TypeError, ValueError):
+            mcap = 0.0
         
         cols = st.columns(3)
         
         with cols[0]:
-            st.metric("📊 TVL (Kilitli Değer)", f"${tvl/1e9:.2f}B" if tvl > 1e9 else f"${tvl/1e6:.0f}M")
+            if tvl > 1e9:
+                tvl_str = f"${tvl/1e9:.2f}B"
+            elif tvl > 0:
+                tvl_str = f"${tvl/1e6:.0f}M"
+            else:
+                tvl_str = "—"
+            st.metric("� TVL (Kilitli Değer)", tvl_str)
+        
         with cols[1]:
-            st.metric("💎 Market Cap", f"${mcap/1e9:.2f}B" if mcap > 1e9 else f"${mcap/1e6:.0f}M" if mcap else "—")
+            if mcap > 1e9:
+                mcap_str = f"${mcap/1e9:.2f}B"
+            elif mcap > 0:
+                mcap_str = f"${mcap/1e6:.0f}M"
+            else:
+                mcap_str = "—"
+            st.metric("💎 Market Cap", mcap_str)
+        
         with cols[2]:
-            mcap_tvl = (mcap / tvl) if tvl and mcap else 0
+            mcap_tvl = (mcap / tvl) if tvl > 0 and mcap > 0 else 0
             color = "🟢" if mcap_tvl < 1 else "🟡" if mcap_tvl < 3 else "🔴"
-            st.metric(f"{color} Mcap/TVL Oranı", f"{mcap_tvl:.2f}x" if mcap_tvl else "—")
+            st.metric(f"{color} Mcap/TVL Oranı", f"{mcap_tvl:.2f}x" if mcap_tvl > 0 else "—")
         
         st.divider()
         
