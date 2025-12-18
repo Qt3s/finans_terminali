@@ -2980,7 +2980,7 @@ def render_ai_page():
 
 # ==================== BACKTEST ENGINE ====================
 
-def run_backtest(predictions: np.ndarray, prices: np.ndarray, fee: float = 0.001) -> dict:
+def run_backtest(predictions, prices, fee: float = 0.001) -> dict:
     """
     Vectorized Backtest Engine.
     
