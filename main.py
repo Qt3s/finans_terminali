@@ -2994,22 +2994,29 @@ def run_backtest(predictions, prices, fee: float = 0.001) -> dict:
     """
     import numpy as np
     
-    n = len(predictions)
+    # Array'leri aynı boyuta getir
+    min_len = min(len(predictions), len(prices))
+    predictions = predictions[:min_len]
+    prices = prices[:min_len]
     
-    # Getiriler
+    # Getiriler (n-1 uzunlukta)
     returns = np.diff(prices) / prices[:-1]
     
+    # Predictions'ı returns ile aynı boyuta getir
+    pred_aligned = predictions[:-1]
+    
     # Sinyal değişimlerini bul (alım-satım noktaları)
-    signal_changes = np.diff(predictions)
+    signal_changes = np.diff(pred_aligned)
     trades = np.sum(np.abs(signal_changes))
     
     # Strateji getirileri (sinyal 1 ise long, 0 ise cash)
-    # Sinyal t anında, t+1 getirisini etkiler
-    strategy_returns = predictions[:-1] * returns
+    strategy_returns = pred_aligned * returns
     
-    # Komisyon maliyeti (her işlemde)
-    trade_costs = np.abs(signal_changes) * fee
-    strategy_returns[1:] -= trade_costs  # İlk sinyal öncesi trade yok
+    # Komisyon maliyeti (her işlemde) - sigmoid_changes 1 eksik
+    if len(signal_changes) > 0:
+        trade_costs = np.zeros_like(strategy_returns)
+        trade_costs[1:] = np.abs(signal_changes) * fee
+        strategy_returns = strategy_returns - trade_costs
     
     # Kümülatif getiriler
     cumulative_strategy = np.cumprod(1 + strategy_returns) - 1
