@@ -386,6 +386,312 @@ def fetch_liquidity_proxy():
         return None, str(e)
 
 
+@st.cache_data(ttl=43200, show_spinner=False)  # 12 saat cache - ağır veri
+def fetch_credit_and_liquidity_data():
+    """
+    Kredi Riski ve Küresel Likidite Verileri.
+    
+    FRED API key olmadan proxy'ler kullanılır:
+    - HYG: iShares High Yield Corporate Bond ETF (kredi spreadi proxy)
+    - LQD: Investment Grade Bond ETF
+    - TIP: TIPS ETF (reel faiz proxy)
+    - HG=F: Copper futures
+    - GC=F: Gold futures
+    """
+    import yfinance as yf
+    import numpy as np
+    
+    try:
+        # ETF ve emtia verileri
+        hyg = yf.Ticker('HYG')  # High Yield Bond ETF
+        lqd = yf.Ticker('LQD')  # Investment Grade Bond ETF
+        tip = yf.Ticker('TIP')  # TIPS ETF (reel faiz proxy)
+        copper = yf.Ticker('HG=F')  # Bakır
+        gold = yf.Ticker('GC=F')  # Altın
+        
+        hyg_hist = hyg.history(period='6mo')
+        lqd_hist = lqd.history(period='6mo')
+        tip_hist = tip.history(period='6mo')
+        copper_hist = copper.history(period='6mo')
+        gold_hist = gold.history(period='6mo')
+        
+        results = {}
+        
+        # HY Spread Proxy: HYG/LQD oranı (düşükse spread yüksek = risk yüksek)
+        if not hyg_hist.empty and not lqd_hist.empty:
+            hyg_last = float(hyg_hist['Close'].iloc[-1])
+            lqd_last = float(lqd_hist['Close'].iloc[-1])
+            hyg_lqd_ratio = hyg_last / lqd_last
+            
+            hyg_prev = float(hyg_hist['Close'].iloc[-30]) if len(hyg_hist) >= 30 else hyg_last
+            lqd_prev = float(lqd_hist['Close'].iloc[-30]) if len(lqd_hist) >= 30 else lqd_last
+            hyg_lqd_prev = hyg_prev / lqd_prev
+            
+            ratio_change = ((hyg_lqd_ratio - hyg_lqd_prev) / hyg_lqd_prev) * 100
+            
+            # Oran düşüyorsa = HY kötüleşiyor = kredi riski artıyor
+            if ratio_change < -3:
+                credit_risk = "YÜKSEK"
+                credit_score = -20
+            elif ratio_change > 3:
+                credit_risk = "DÜŞÜK"
+                credit_score = 15
+            else:
+                credit_risk = "NORMAL"
+                credit_score = 0
+            
+            results['credit'] = {
+                'hyg_lqd_ratio': hyg_lqd_ratio,
+                'change_30d': ratio_change,
+                'risk_level': credit_risk,
+                'credit_score': credit_score
+            }
+        
+        # Reel Faiz Proxy: TIP performansı
+        if not tip_hist.empty:
+            tip_last = float(tip_hist['Close'].iloc[-1])
+            tip_prev = float(tip_hist['Close'].iloc[-30]) if len(tip_hist) >= 30 else tip_last
+            tip_change = ((tip_last - tip_prev) / tip_prev) * 100
+            
+            # TIP yükseliyorsa reel faiz düşüyor = BTC/Altın lehine
+            if tip_change > 3:
+                real_yield_trend = "DÜŞÜYOR"
+                real_yield_score = 15
+            elif tip_change < -3:
+                real_yield_trend = "YÜKSELIYOR"
+                real_yield_score = -10
+            else:
+                real_yield_trend = "STABIL"
+                real_yield_score = 0
+            
+            results['real_yield'] = {
+                'tip_value': tip_last,
+                'change_30d': tip_change,
+                'trend': real_yield_trend,
+                'score': real_yield_score
+            }
+        
+        # Copper/Gold Ratio: Ekonomik sağlık göstergesi
+        if not copper_hist.empty and not gold_hist.empty:
+            copper_last = float(copper_hist['Close'].iloc[-1])
+            gold_last = float(gold_hist['Close'].iloc[-1])
+            cu_au_ratio = copper_last / gold_last * 1000  # Normalize
+            
+            copper_prev = float(copper_hist['Close'].iloc[-30]) if len(copper_hist) >= 30 else copper_last
+            gold_prev = float(gold_hist['Close'].iloc[-30]) if len(gold_hist) >= 30 else gold_last
+            cu_au_prev = copper_prev / gold_prev * 1000
+            
+            cu_au_change = ((cu_au_ratio - cu_au_prev) / cu_au_prev) * 100
+            
+            # Cu/Au yükseliyorsa = ekonomik iyimserlik
+            if cu_au_change > 5:
+                economic_outlook = "İYİMSER"
+                econ_score = 10
+            elif cu_au_change < -5:
+                economic_outlook = "KÖTÜMSER"
+                econ_score = -10
+            else:
+                economic_outlook = "NÖTR"
+                econ_score = 0
+            
+            results['copper_gold'] = {
+                'ratio': cu_au_ratio,
+                'change_30d': cu_au_change,
+                'outlook': economic_outlook,
+                'score': econ_score
+            }
+        
+        return results, None
+    except Exception as e:
+        return None, str(e)
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def fetch_rolling_correlations(window: int = 30):
+    """
+    BTC ile diğer varlıklar arasındaki hareketli korelasyon.
+    BTC 'teknoloji hissesi' mi yoksa 'dijital altın' mı gibi davranıyor?
+    """
+    import yfinance as yf
+    import numpy as np
+    
+    try:
+        btc = yf.Ticker('BTC-USD')
+        nasdaq = yf.Ticker('^IXIC')
+        gold = yf.Ticker('GC=F')
+        sp500 = yf.Ticker('^GSPC')
+        
+        period = '6mo'
+        btc_hist = btc.history(period=period)
+        nasdaq_hist = nasdaq.history(period=period)
+        gold_hist = gold.history(period=period)
+        sp500_hist = sp500.history(period=period)
+        
+        if btc_hist.empty:
+            return None, "BTC verisi alınamadı"
+        
+        # Tarihleri normalize et
+        btc_ret = btc_hist['Close'].pct_change().dropna()
+        btc_ret.index = btc_ret.index.date
+        
+        nasdaq_ret = nasdaq_hist['Close'].pct_change().dropna() if not nasdaq_hist.empty else None
+        if nasdaq_ret is not None:
+            nasdaq_ret.index = nasdaq_ret.index.date
+        
+        gold_ret = gold_hist['Close'].pct_change().dropna() if not gold_hist.empty else None
+        if gold_ret is not None:
+            gold_ret.index = gold_ret.index.date
+        
+        sp500_ret = sp500_hist['Close'].pct_change().dropna() if not sp500_hist.empty else None
+        if sp500_ret is not None:
+            sp500_ret.index = sp500_ret.index.date
+        
+        # Rolling correlation hesapla
+        correlations = {'dates': [], 'btc_nasdaq': [], 'btc_gold': [], 'btc_sp500': []}
+        
+        # Ortak tarihleri bul
+        all_dates = sorted(set(btc_ret.index))
+        
+        for i in range(window, len(all_dates)):
+            date_window = all_dates[i-window:i]
+            current_date = all_dates[i-1]
+            
+            try:
+                btc_window = btc_ret.loc[[d for d in date_window if d in btc_ret.index]]
+                
+                if len(btc_window) < window // 2:
+                    continue
+                
+                correlations['dates'].append(current_date)
+                
+                # BTC-Nasdaq korelasyonu
+                if nasdaq_ret is not None:
+                    nasdaq_window = nasdaq_ret.loc[[d for d in date_window if d in nasdaq_ret.index]]
+                    common = btc_window.index.intersection(nasdaq_window.index)
+                    if len(common) >= 10:
+                        corr = btc_window.loc[common].corr(nasdaq_window.loc[common])
+                        correlations['btc_nasdaq'].append(float(corr) if not np.isnan(corr) else 0)
+                    else:
+                        correlations['btc_nasdaq'].append(0)
+                
+                # BTC-Gold korelasyonu
+                if gold_ret is not None:
+                    gold_window = gold_ret.loc[[d for d in date_window if d in gold_ret.index]]
+                    common = btc_window.index.intersection(gold_window.index)
+                    if len(common) >= 10:
+                        corr = btc_window.loc[common].corr(gold_window.loc[common])
+                        correlations['btc_gold'].append(float(corr) if not np.isnan(corr) else 0)
+                    else:
+                        correlations['btc_gold'].append(0)
+                
+                # BTC-S&P500 korelasyonu
+                if sp500_ret is not None:
+                    sp_window = sp500_ret.loc[[d for d in date_window if d in sp500_ret.index]]
+                    common = btc_window.index.intersection(sp_window.index)
+                    if len(common) >= 10:
+                        corr = btc_window.loc[common].corr(sp_window.loc[common])
+                        correlations['btc_sp500'].append(float(corr) if not np.isnan(corr) else 0)
+                    else:
+                        correlations['btc_sp500'].append(0)
+            except:
+                continue
+        
+        # Son korelasyonlar
+        if correlations['btc_nasdaq']:
+            last_nasdaq_corr = correlations['btc_nasdaq'][-1]
+        else:
+            last_nasdaq_corr = 0
+        
+        if correlations['btc_gold']:
+            last_gold_corr = correlations['btc_gold'][-1]
+        else:
+            last_gold_corr = 0
+        
+        # BTC karakteri belirleme
+        if last_nasdaq_corr > 0.5:
+            btc_character = "📈 Teknoloji Hissesi"
+            character_detail = "BTC şu an Nasdaq ile yüksek korelasyonda"
+        elif last_gold_corr > 0.3:
+            btc_character = "🥇 Dijital Altın"
+            character_detail = "BTC şu an altın ile pozitif korelasyonda"
+        elif last_nasdaq_corr < 0 and last_gold_corr > 0:
+            btc_character = "⚡ Bağımsız Varlık"
+            character_detail = "BTC kendi dinamiğinde hareket ediyor"
+        else:
+            btc_character = "🔄 Geçiş Dönemi"
+            character_detail = "BTC karakteri belirsiz"
+        
+        return {
+            'history': correlations,
+            'last_nasdaq_corr': last_nasdaq_corr,
+            'last_gold_corr': last_gold_corr,
+            'btc_character': btc_character,
+            'character_detail': character_detail
+        }, None
+    except Exception as e:
+        return None, str(e)
+
+
+def prepare_master_features(macro_data, liquidity_data, yield_data, credit_data, fng_data, correlation_data):
+    """
+    XGBoost modeli için master feature matrix hazırlar.
+    Tüm makro ve sentiment verilerini birleştirir.
+    NaN değerlerini forward-fill ile doldurur.
+    """
+    import pandas as pd
+    import numpy as np
+    
+    features = {}
+    
+    # Makro veriler
+    if macro_data:
+        features['dxy'] = macro_data.get('DXY', {}).get('value')
+        features['dxy_change_5d'] = macro_data.get('DXY', {}).get('change_5d')
+        features['vix'] = macro_data.get('VIX', {}).get('value')
+        features['vix_change_5d'] = macro_data.get('VIX', {}).get('change_5d')
+        features['gold_change_30d'] = macro_data.get('Gold', {}).get('change_30d')
+        features['oil_change_5d'] = macro_data.get('Oil', {}).get('change_5d')
+        features['usdjpy'] = macro_data.get('USDJPY', {}).get('value')
+    
+    # Likidite
+    if liquidity_data:
+        features['liquidity_score'] = liquidity_data.get('liquidity_score')
+        features['tlt_change_30d'] = liquidity_data.get('tlt_change_30d')
+    
+    # Getiri eğrisi
+    if yield_data:
+        features['yield_spread'] = yield_data.get('spread')
+        features['yield_inverted'] = 1 if yield_data.get('inverted') else 0
+    
+    # Kredi
+    if credit_data:
+        features['credit_score'] = credit_data.get('credit', {}).get('credit_score')
+        features['real_yield_score'] = credit_data.get('real_yield', {}).get('score')
+        features['copper_gold_score'] = credit_data.get('copper_gold', {}).get('score')
+    
+    # Sentiment
+    if fng_data:
+        features['fear_greed'] = fng_data.get('value')
+        features['fear_greed_avg_7d'] = fng_data.get('avg_7d')
+    
+    # Korelasyonlar
+    if correlation_data:
+        features['btc_nasdaq_corr'] = correlation_data.get('last_nasdaq_corr')
+        features['btc_gold_corr'] = correlation_data.get('last_gold_corr')
+    
+    # NaN değerlerini temizle (0 ile doldur)
+    for key in features:
+        if features[key] is None or (isinstance(features[key], float) and np.isnan(features[key])):
+            features[key] = 0.0
+        else:
+            features[key] = float(features[key])
+    
+    # Session state'e kaydet
+    st.session_state['master_features'] = features
+    
+    return features
+
+
 @st.cache_data(ttl=21600, show_spinner=False)  # 6 saat cache
 def fetch_fear_greed_index():
     """
@@ -1529,6 +1835,11 @@ def render_macro_page():
         yield_data, yield_err = fetch_yield_curve_data()
         fng_data, fng_err = fetch_fear_greed_index()
         sentiment_data, sent_err = fetch_market_sentiment()
+        credit_data, credit_err = fetch_credit_and_liquidity_data()
+        correlation_data, corr_err = fetch_rolling_correlations(30)
+    
+    # Master features hazırla (XGBoost için)
+    master_features = prepare_master_features(macro_data, liquidity_data, yield_data, credit_data, fng_data, correlation_data)
     
     # ==================== PİYASA REJİMİ ====================
     st.subheader("🎯 Piyasa Rejimi Analizi")
@@ -1922,7 +2233,131 @@ def render_macro_page():
             """)
     else:
         st.warning(f"Getiri eğrisi verisi alınamadı: {yield_err}")
-
+    
+    st.divider()
+    
+    # ==================== KREDİ RİSKİ ====================
+    st.subheader("💳 Kredi Riski ve Ekonomik Sağlık")
+    
+    if credit_data:
+        credit_cols = st.columns(3)
+        
+        # Kredi Spreadi
+        with credit_cols[0]:
+            if credit_data.get('credit'):
+                cr = credit_data['credit']
+                cr_color = "#FF1744" if cr['risk_level'] == "YÜKSEK" else "#00C853" if cr['risk_level'] == "DÜŞÜK" else "#FF9800"
+                st.markdown(f"""
+                <div style="text-align: center; padding: 15px; background: {cr_color}22; border-radius: 10px; border: 2px solid {cr_color};">
+                    <p style="margin: 0; color: #888;">HY/IG Spread</p>
+                    <h3 style="color: {cr_color}; margin: 5px 0;">{cr['risk_level']}</h3>
+                    <p style="color: {cr_color}; margin: 0;">{cr['change_30d']:+.1f}% (30g)</p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Reel Faiz
+        with credit_cols[1]:
+            if credit_data.get('real_yield'):
+                ry = credit_data['real_yield']
+                ry_color = "#00C853" if ry['trend'] == "DÜŞÜYOR" else "#FF1744" if ry['trend'] == "YÜKSELIYOR" else "#FF9800"
+                st.markdown(f"""
+                <div style="text-align: center; padding: 15px; background: {ry_color}22; border-radius: 10px; border: 2px solid {ry_color};">
+                    <p style="margin: 0; color: #888;">Reel Faiz</p>
+                    <h3 style="color: {ry_color}; margin: 5px 0;">{ry['trend']}</h3>
+                    <p style="color: {ry_color}; margin: 0;">TIP: {ry['change_30d']:+.1f}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Copper/Gold
+        with credit_cols[2]:
+            if credit_data.get('copper_gold'):
+                cg = credit_data['copper_gold']
+                cg_color = "#00C853" if cg['outlook'] == "İYİMSER" else "#FF1744" if cg['outlook'] == "KÖTÜMSER" else "#FF9800"
+                st.markdown(f"""
+                <div style="text-align: center; padding: 15px; background: {cg_color}22; border-radius: 10px; border: 2px solid {cg_color};">
+                    <p style="margin: 0; color: #888;">Cu/Au Oranı</p>
+                    <h3 style="color: {cg_color}; margin: 5px 0;">{cg['outlook']}</h3>
+                    <p style="color: {cg_color}; margin: 0;">{cg['change_30d']:+.1f}% (30g)</p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        with st.expander("💡 Göstergeler Ne Anlama Geliyor?"):
+            st.write("""
+            **HY/IG Spread**: High Yield vs Investment Grade tahvil oranı. Düşüyorsa → Kredi riski artıyor
+            
+            **Reel Faiz**: TIP ETF ile ölçülür. Düşüyorsa → BTC ve Altın lehine
+            
+            **Cu/Au Oranı**: Bakır/Altın oranı ekonomik sağlık göstergesi. Yükseliyorsa → Ekonomik iyimserlik
+            """)
+    else:
+        st.warning(f"Kredi verisi alınamadı: {credit_err}")
+    
+    st.divider()
+    
+    # ==================== BTC KARAKTERİ ====================
+    st.subheader("🎭 BTC Karakteri: Teknoloji mi, Dijital Altın mı?")
+    
+    if correlation_data:
+        char_cols = st.columns([1, 2])
+        
+        with char_cols[0]:
+            char_color = "#2196F3" if "Teknoloji" in correlation_data['btc_character'] else "#FFD700" if "Altın" in correlation_data['btc_character'] else "#9C27B0"
+            st.markdown(f"""
+            <div style="text-align: center; padding: 25px; background: {char_color}22; border-radius: 15px; border: 3px solid {char_color};">
+                <h2 style="color: {char_color}; margin: 0;">{correlation_data['btc_character']}</h2>
+                <p style="color: #888; margin: 10px 0;">{correlation_data['character_detail']}</p>
+                <p style="margin: 5px 0;">Nasdaq: <b>{correlation_data['last_nasdaq_corr']:.2f}</b></p>
+                <p style="margin: 5px 0;">Gold: <b>{correlation_data['last_gold_corr']:.2f}</b></p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with char_cols[1]:
+            # Rolling correlation grafiği
+            if correlation_data.get('history') and correlation_data['history'].get('dates'):
+                corr_hist = correlation_data['history']
+                
+                fig = go.Figure()
+                
+                if corr_hist.get('btc_nasdaq'):
+                    fig.add_trace(go.Scatter(
+                        x=corr_hist['dates'],
+                        y=corr_hist['btc_nasdaq'],
+                        name='BTC-Nasdaq',
+                        line=dict(color='#2196F3', width=2)
+                    ))
+                
+                if corr_hist.get('btc_gold'):
+                    fig.add_trace(go.Scatter(
+                        x=corr_hist['dates'],
+                        y=corr_hist['btc_gold'],
+                        name='BTC-Gold',
+                        line=dict(color='#FFD700', width=2)
+                    ))
+                
+                fig.add_hline(y=0, line_dash="dash", line_color="gray")
+                
+                fig.update_layout(
+                    template="plotly_dark",
+                    height=250,
+                    margin=dict(l=0, r=0, t=20, b=20),
+                    yaxis_title="Korelasyon",
+                    yaxis=dict(range=[-1, 1]),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02)
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning(f"Korelasyon verisi alınamadı: {corr_err}")
+    
+    st.divider()
+    
+    # ==================== MASTER FEATURES ====================
+    with st.expander("🤖 XGBoost Feature Matrix (ML Ready)"):
+        if master_features:
+            st.json(master_features)
+            st.success(f"✅ {len(master_features)} feature hazır. st.session_state['master_features'] içinde kaydedildi.")
+        else:
+            st.warning("Feature matrix henüz hazır değil.")
 
 
 def render_settings_page():
