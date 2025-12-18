@@ -1,5 +1,6 @@
 """
-Profesyonel Finans Terminali
+Profesyonel Finans Terminali v2.0
+Modüler mimari, sidebar navigasyon, dinamik filtreler
 Streamlit Cloud için optimize edilmiş, mobil uyumlu dashboard
 """
 
@@ -8,15 +9,16 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-# Sayfa Konfigürasyonu
+# ==================== SAYFA KONFİGÜRASYONU ====================
+
 st.set_page_config(
     page_title="Finans Terminali",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="collapsed"  # Mobilde kapalı başlat
+    initial_sidebar_state="expanded"
 )
 
-# Custom CSS - Mobil ve masaüstü uyumu için
+# Custom CSS - Mobil ve masaüstü uyumu
 st.markdown("""
 <style>
     /* Ana konteyner padding ayarı */
@@ -27,33 +29,45 @@ st.markdown("""
     
     /* Metrik kartları için stil */
     [data-testid="stMetricValue"] {
-        font-size: 2rem;
+        font-size: 1.8rem;
         font-weight: bold;
     }
     
-    /* Mobil için daha iyi responsive */
+    /* Sidebar başlık stili */
+    [data-testid="stSidebar"] h1 {
+        font-size: 1.5rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 2px solid #4CAF50;
+    }
+    
+    /* Mobil için responsive */
     @media (max-width: 768px) {
         [data-testid="stMetricValue"] {
-            font-size: 1.5rem;
+            font-size: 1.3rem;
         }
         .main .block-container {
-            padding-left: 1rem;
-            padding-right: 1rem;
+            padding-left: 0.5rem;
+            padding-right: 0.5rem;
         }
+    }
+    
+    /* Container kartları için stil */
+    .stContainer {
+        border-radius: 10px;
+        padding: 1rem;
     }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ==================== CACHING FONKSİYONLARI ====================
+# ==================== BORSA KONFİGÜRASYONU ====================
 
-# Desteklenen borsalar ve parite dönüşümleri
 EXCHANGE_CONFIGS = [
     {
         'name': 'kucoin',
         'class': 'kucoin',
         'options': {'enableRateLimit': True},
-        'symbol_map': {}  # Direkt kullan: BTC/USDT
+        'symbol_map': {}
     },
     {
         'name': 'kraken',
@@ -66,11 +80,16 @@ EXCHANGE_CONFIGS = [
             'XRP/USDT': 'XRP/USDT',
             'ADA/USDT': 'ADA/USDT',
             'DOGE/USDT': 'DOGE/USDT',
-            'BNB/USDT': 'BNB/USDT',  # Kraken'de olmayabilir, fallback
+            'BNB/USDT': 'BNB/USDT',
         }
     },
 ]
 
+CRYPTO_SYMBOLS = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT", "DOGE/USDT"]
+TIMEFRAMES = {"1 Saat": "1h", "4 Saat": "4h", "1 Gün": "1d", "1 Hafta": "1w"}
+
+
+# ==================== VERİ ÇEKİCİ FONKSİYONLAR ====================
 
 def get_exchange_instance(config):
     """Borsa instance'ı oluşturur."""
@@ -79,69 +98,50 @@ def get_exchange_instance(config):
     return exchange_class(config['options'])
 
 
-@st.cache_data(ttl=300, show_spinner=False)  # 5 dakika cache
-def fetch_crypto_ohlcv(symbol: str, timeframe: str, limit: int = 100):
-    """
-    Birden fazla borsadan OHLCV verisi çeker (fallback mekanizması).
-    KuCoin -> Kraken sırasıyla dener.
-    """
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_crypto_ticker(symbol: str):
+    """Birden fazla borsadan anlık fiyat bilgisi çeker (fallback)."""
     import ccxt
     errors = []
     
     for config in EXCHANGE_CONFIGS:
         try:
             exchange = get_exchange_instance(config)
-            
-            # Sembol dönüşümü (gerekirse)
             mapped_symbol = config['symbol_map'].get(symbol, symbol)
-            
+            ticker = exchange.fetch_ticker(mapped_symbol)
+            return ticker, None, config['name']
+        except Exception as e:
+            errors.append(f"{config['name']}: {str(e)}")
+            continue
+    
+    return None, " | ".join(errors), None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_crypto_ohlcv(symbol: str, timeframe: str, limit: int = 100):
+    """Birden fazla borsadan OHLCV verisi çeker (fallback)."""
+    import ccxt
+    errors = []
+    
+    for config in EXCHANGE_CONFIGS:
+        try:
+            exchange = get_exchange_instance(config)
+            mapped_symbol = config['symbol_map'].get(symbol, symbol)
             ohlcv = exchange.fetch_ohlcv(mapped_symbol, timeframe, limit=limit)
             
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            return df, None, config['name']  # Başarılı borsa adını da döndür
-            
+            return df, None, config['name']
         except Exception as e:
             errors.append(f"{config['name']}: {str(e)}")
             continue
     
-    # Tüm borsalar başarısız olduysa
     return None, " | ".join(errors), None
 
 
-@st.cache_data(ttl=300, show_spinner=False)  # 5 dakika cache
-def fetch_crypto_ticker(symbol: str):
-    """
-    Birden fazla borsadan anlık fiyat bilgisi çeker (fallback mekanizması).
-    KuCoin -> Kraken sırasıyla dener.
-    """
-    import ccxt
-    errors = []
-    
-    for config in EXCHANGE_CONFIGS:
-        try:
-            exchange = get_exchange_instance(config)
-            
-            # Sembol dönüşümü (gerekirse)
-            mapped_symbol = config['symbol_map'].get(symbol, symbol)
-            
-            ticker = exchange.fetch_ticker(mapped_symbol)
-            return ticker, None, config['name']  # Başarılı borsa adını da döndür
-            
-        except Exception as e:
-            errors.append(f"{config['name']}: {str(e)}")
-            continue
-    
-    # Tüm borsalar başarısız olduysa
-    return None, " | ".join(errors), None
-
-
-@st.cache_data(ttl=900, show_spinner=False)  # 15 dakika cache (rate limit için artırıldı)
+@st.cache_data(ttl=900, show_spinner=False)
 def fetch_stock_data(symbol: str, period: str = "6mo"):
-    """
-    Yahoo Finance'den hisse senedi verisi çeker.
-    Retry mekanizması ile rate limiting'e karşı koruma.
-    """
+    """Yahoo Finance'den hisse senedi verisi çeker."""
     import time
     max_retries = 3
     
@@ -152,30 +152,26 @@ def fetch_stock_data(symbol: str, period: str = "6mo"):
             hist = ticker.history(period=period)
             
             if hist.empty:
-                return None, f"'{symbol}' sembolü için veri bulunamadı."
+                return None, f"'{symbol}' için veri bulunamadı."
             
             return hist, None
         except Exception as e:
             error_msg = str(e).lower()
             if "rate" in error_msg or "too many" in error_msg:
                 if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)  # Exponential backoff: 1, 2, 4 saniye
+                    time.sleep(2 ** attempt)
                     continue
             return None, str(e)
     
-    return None, "Rate limit aşıldı. Lütfen birkaç dakika bekleyin."
+    return None, "Rate limit aşıldı. Lütfen bekleyin."
 
 
-@st.cache_data(ttl=60, show_spinner=False)  # 1 dakika cache (on-chain daha dinamik)
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_ethereum_data():
-    """
-    Ethereum ağından blok ve gas bilgisi çeker.
-    Ücretsiz genel RPC endpoint kullanır.
-    """
+    """Ethereum ağından blok ve gas bilgisi çeker."""
     try:
         from web3 import Web3
         
-        # Ücretsiz genel Ethereum RPC noktaları
         rpc_endpoints = [
             "https://cloudflare-eth.com",
             "https://eth.llamarpc.com",
@@ -198,221 +194,403 @@ def fetch_ethereum_data():
             except:
                 continue
         
-        return None, "Tüm Ethereum RPC noktalarına bağlanılamadı."
+        return None, "Tüm RPC noktalarına bağlanılamadı."
     except Exception as e:
         return None, str(e)
 
 
-# ==================== SIDEBAR (YAN MENÜ) ====================
+# ==================== SAYFA FONKSİYONLARI ====================
 
-st.sidebar.title("⚙️ Ayarlar")
-
-# Kripto Ayarları
-st.sidebar.header("🪙 Kripto")
-crypto_symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT", "DOGE/USDT"]
-selected_crypto = st.sidebar.selectbox("Parite Seç", crypto_symbols, index=0)
-timeframes = {"1 Saat": "1h", "4 Saat": "4h", "1 Gün": "1d", "1 Hafta": "1w"}
-selected_timeframe_label = st.sidebar.selectbox("Zaman Dilimi", list(timeframes.keys()), index=1)
-selected_timeframe = timeframes[selected_timeframe_label]
-
-st.sidebar.divider()
-
-# Hisse Senedi Ayarları
-st.sidebar.header("📈 Hisse Senedi")
-stock_symbol = st.sidebar.text_input(
-    "Sembol Gir", 
-    value="AAPL",
-    help="Örnek: AAPL, GOOGL, MSFT, THYAO.IS (Türk hisseleri için .IS ekleyin)"
-)
-
-st.sidebar.divider()
-
-# Bilgi
-st.sidebar.info("💡 Veriler her 5 dakikada bir güncellenir. On-chain verileri 1 dakikada bir yenilenir.")
-
-
-# ==================== ANA EKRAN ====================
-
-st.title("📊 Finans Terminali")
-
-# Sekmeler
-tab_crypto, tab_stock, tab_onchain = st.tabs(["🪙 Kripto", "📈 Hisse Senedi", "⛓️ On-Chain"])
-
-
-# ==================== SEKME 1: KRİPTO ====================
-
-with tab_crypto:
-    st.subheader(f"{selected_crypto} - {selected_timeframe_label}")
-    
-    # Anlık fiyat bilgisi
-    with st.spinner("Fiyat bilgisi alınıyor..."):
-        ticker_data, ticker_error, ticker_exchange = fetch_crypto_ticker(selected_crypto)
-    
-    if ticker_error:
-        st.error(f"⚠️ Fiyat verisi alınamadı: {ticker_error}")
-    elif ticker_data:
-        # Hangi borsadan geldiğini göster
-        st.caption(f"📡 Veri kaynağı: **{ticker_exchange.upper()}**")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            current_price = ticker_data.get('last', 0)
-            change_percent = ticker_data.get('percentage', 0)
-            st.metric(
-                label="Anlık Fiyat",
-                value=f"${current_price:,.2f}",
-                delta=f"{change_percent:+.2f}%"
-            )
-        
-        with col2:
-            high_24h = ticker_data.get('high', 0)
-            st.metric(label="24s Yüksek", value=f"${high_24h:,.2f}")
-        
-        with col3:
-            low_24h = ticker_data.get('low', 0)
-            st.metric(label="24s Düşük", value=f"${low_24h:,.2f}")
+def show_dashboard():
+    """Ana Dashboard - Piyasa Özeti"""
+    st.title("🏠 Piyasa Özeti")
+    st.caption("Anlık piyasa durumu ve önemli varlıklar")
     
     st.divider()
     
-    # OHLCV Verisi ve Mum Grafiği
-    with st.spinner("Grafik verisi yükleniyor..."):
-        ohlcv_data, ohlcv_error, ohlcv_exchange = fetch_crypto_ohlcv(selected_crypto, selected_timeframe)
+    # Kripto Özet Bölümü
+    st.subheader("🪙 Kripto Piyasası")
     
-    if ohlcv_error:
-        st.error(f"⚠️ Grafik verisi alınamadı: {ohlcv_error}")
-        st.warning("Lütfen birkaç dakika bekleyip tekrar deneyin veya başka bir parite seçin.")
-    elif ohlcv_data is not None and not ohlcv_data.empty:
-        # Plotly Candlestick Grafiği
-        fig = go.Figure(data=[go.Candlestick(
-            x=ohlcv_data['timestamp'],
-            open=ohlcv_data['open'],
-            high=ohlcv_data['high'],
-            low=ohlcv_data['low'],
-            close=ohlcv_data['close'],
-            increasing_line_color='#00C853',  # Yeşil
-            decreasing_line_color='#FF1744',  # Kırmızı
-            name=selected_crypto
-        )])
+    with st.container():
+        col1, col2, col3 = st.columns(3)
         
-        fig.update_layout(
-            title=None,
-            yaxis_title="Fiyat (USDT)",
-            xaxis_title=None,
-            template="plotly_dark",
-            height=500,
-            margin=dict(l=0, r=0, t=20, b=20),
-            xaxis_rangeslider_visible=False,
-            showlegend=False
-        )
+        # Bitcoin
+        with col1:
+            with st.spinner("BTC..."):
+                btc_data, btc_error, _ = fetch_crypto_ticker("BTC/USDT")
+            if btc_data:
+                st.metric(
+                    label="Bitcoin (BTC)",
+                    value=f"${btc_data.get('last', 0):,.0f}",
+                    delta=f"{btc_data.get('percentage', 0):+.2f}%"
+                )
+            else:
+                st.metric(label="Bitcoin (BTC)", value="—", delta="Veri yok")
         
-        st.plotly_chart(fig, use_container_width=True)
+        # Ethereum
+        with col2:
+            with st.spinner("ETH..."):
+                eth_data, eth_error, _ = fetch_crypto_ticker("ETH/USDT")
+            if eth_data:
+                st.metric(
+                    label="Ethereum (ETH)",
+                    value=f"${eth_data.get('last', 0):,.0f}",
+                    delta=f"{eth_data.get('percentage', 0):+.2f}%"
+                )
+            else:
+                st.metric(label="Ethereum (ETH)", value="—", delta="Veri yok")
         
-        # Hacim bilgisi
-        total_volume = ohlcv_data['volume'].sum()
-        st.caption(f"📊 Toplam İşlem Hacmi (son {len(ohlcv_data)} mum): {total_volume:,.0f}")
-    else:
-        st.warning("Grafik verisi boş döndü. Lütfen başka bir parite veya zaman dilimi deneyin.")
-
-
-# ==================== SEKME 2: HİSSE SENEDİ ====================
-
-with tab_stock:
-    st.subheader(f"📈 {stock_symbol.upper()} - Son 6 Ay")
+        # Solana
+        with col3:
+            with st.spinner("SOL..."):
+                sol_data, sol_error, _ = fetch_crypto_ticker("SOL/USDT")
+            if sol_data:
+                st.metric(
+                    label="Solana (SOL)",
+                    value=f"${sol_data.get('last', 0):,.2f}",
+                    delta=f"{sol_data.get('percentage', 0):+.2f}%"
+                )
+            else:
+                st.metric(label="Solana (SOL)", value="—", delta="Veri yok")
     
-    if stock_symbol.strip():
-        with st.spinner("Hisse verisi alınıyor..."):
-            stock_data, stock_error = fetch_stock_data(stock_symbol.strip().upper())
+    st.divider()
+    
+    # Hisse Senedi Özet Bölümü
+    st.subheader("📈 Hisse Senedi Piyasası")
+    
+    with st.container():
+        col1, col2, col3 = st.columns(3)
         
-        if stock_error:
-            st.error(f"⚠️ Hisse verisi alınamadı: {stock_error}")
-            st.info("💡 İpucu: Türk hisseleri için '.IS' eki kullanın (örn: THYAO.IS)")
-        elif stock_data is not None and not stock_data.empty:
-            # Metrikleri göster
-            col1, col2, col3 = st.columns(3)
+        stock_list = [
+            ("AAPL", "Apple"),
+            ("GOOGL", "Google"),
+            ("MSFT", "Microsoft")
+        ]
+        
+        for col, (symbol, name) in zip([col1, col2, col3], stock_list):
+            with col:
+                with st.spinner(f"{symbol}..."):
+                    stock_data, stock_error = fetch_stock_data(symbol, "5d")
+                if stock_data is not None and not stock_data.empty:
+                    last_close = stock_data['Close'].iloc[-1]
+                    prev_close = stock_data['Close'].iloc[-2] if len(stock_data) > 1 else last_close
+                    change = ((last_close - prev_close) / prev_close) * 100
+                    st.metric(
+                        label=f"{name} ({symbol})",
+                        value=f"${last_close:,.2f}",
+                        delta=f"{change:+.2f}%"
+                    )
+                else:
+                    st.metric(label=f"{name} ({symbol})", value="—", delta="Veri yok")
+    
+    st.divider()
+    
+    # Ethereum Ağ Durumu
+    st.subheader("⛓️ Ethereum Ağ Durumu")
+    
+    with st.container():
+        col1, col2 = st.columns(2)
+        
+        with st.spinner("Ethereum ağına bağlanılıyor..."):
+            eth_chain, eth_error = fetch_ethereum_data()
+        
+        if eth_chain:
+            with col1:
+                st.metric(
+                    label="📦 Son Blok",
+                    value=f"{eth_chain['block_number']:,}"
+                )
+            with col2:
+                gas_gwei = eth_chain['gas_price_gwei']
+                gas_status = "🟢" if gas_gwei < 20 else "🟡" if gas_gwei < 50 else "🔴"
+                st.metric(
+                    label=f"⛽ Gas Ücreti {gas_status}",
+                    value=f"{gas_gwei} Gwei"
+                )
+        else:
+            st.warning("Ethereum ağ verisi alınamadı.")
+
+
+def show_crypto_page():
+    """Kripto Terminal Sayfası"""
+    st.title("🪙 Kripto Terminal")
+    
+    # Session state'den seçimleri al
+    selected_crypto = st.session_state.get('crypto_symbol', 'BTC/USDT')
+    selected_tf_label = st.session_state.get('crypto_timeframe', '4 Saat')
+    selected_timeframe = TIMEFRAMES.get(selected_tf_label, '4h')
+    
+    st.caption(f"📡 {selected_crypto} | {selected_tf_label}")
+    st.divider()
+    
+    # Anlık Fiyat Bilgisi
+    with st.container():
+        with st.spinner("Fiyat bilgisi alınıyor..."):
+            ticker_data, ticker_error, exchange_name = fetch_crypto_ticker(selected_crypto)
+        
+        if ticker_error:
+            st.error(f"⚠️ Fiyat verisi alınamadı: {ticker_error}")
+        elif ticker_data:
+            st.caption(f"Veri kaynağı: **{exchange_name.upper()}**")
+            
+            col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                last_close = stock_data['Close'].iloc[-1]
-                prev_close = stock_data['Close'].iloc[-2] if len(stock_data) > 1 else last_close
-                change = ((last_close - prev_close) / prev_close) * 100
                 st.metric(
-                    label="Son Kapanış",
-                    value=f"${last_close:,.2f}",
-                    delta=f"{change:+.2f}%"
+                    label="💰 Anlık Fiyat",
+                    value=f"${ticker_data.get('last', 0):,.2f}",
+                    delta=f"{ticker_data.get('percentage', 0):+.2f}%"
                 )
             
             with col2:
-                high_6m = stock_data['High'].max()
-                st.metric(label="6 Ay Yüksek", value=f"${high_6m:,.2f}")
+                st.metric(label="📈 24s Yüksek", value=f"${ticker_data.get('high', 0):,.2f}")
             
             with col3:
-                low_6m = stock_data['Low'].min()
-                st.metric(label="6 Ay Düşük", value=f"${low_6m:,.2f}")
+                st.metric(label="📉 24s Düşük", value=f"${ticker_data.get('low', 0):,.2f}")
             
-            st.divider()
+            with col4:
+                volume = ticker_data.get('quoteVolume', 0) or 0
+                st.metric(label="📊 24s Hacim", value=f"${volume/1e6:,.1f}M")
+    
+    st.divider()
+    
+    # Mum Grafiği
+    with st.container():
+        st.subheader("📊 Fiyat Grafiği")
+        
+        with st.spinner("Grafik yükleniyor..."):
+            ohlcv_data, ohlcv_error, ohlcv_exchange = fetch_crypto_ohlcv(selected_crypto, selected_timeframe)
+        
+        if ohlcv_error:
+            st.error(f"⚠️ Grafik verisi alınamadı: {ohlcv_error}")
+        elif ohlcv_data is not None and not ohlcv_data.empty:
+            fig = go.Figure(data=[go.Candlestick(
+                x=ohlcv_data['timestamp'],
+                open=ohlcv_data['open'],
+                high=ohlcv_data['high'],
+                low=ohlcv_data['low'],
+                close=ohlcv_data['close'],
+                increasing_line_color='#00C853',
+                decreasing_line_color='#FF1744',
+                name=selected_crypto
+            )])
             
-            # Çizgi grafiği
-            st.line_chart(stock_data['Close'], use_container_width=True)
+            fig.update_layout(
+                yaxis_title="Fiyat (USDT)",
+                template="plotly_dark",
+                height=500,
+                margin=dict(l=0, r=0, t=20, b=20),
+                xaxis_rangeslider_visible=False,
+                showlegend=False
+            )
             
-            st.caption(f"📅 Veri aralığı: {stock_data.index[0].strftime('%d/%m/%Y')} - {stock_data.index[-1].strftime('%d/%m/%Y')}")
+            st.plotly_chart(fig, use_container_width=True)
+            
+            total_volume = ohlcv_data['volume'].sum()
+            st.caption(f"📊 Toplam Hacim (son {len(ohlcv_data)} mum): {total_volume:,.0f}")
         else:
-            st.warning("Hisse verisi bulunamadı.")
+            st.warning("Grafik verisi yüklenemedi.")
+
+
+def show_stock_page():
+    """Hisse Senedi Sayfası"""
+    st.title("📈 Hisse Senedi Terminali")
+    
+    stock_symbol = st.session_state.get('stock_symbol', 'AAPL')
+    
+    st.caption(f"📊 {stock_symbol.upper()} - Son 6 Ay")
+    st.divider()
+    
+    if stock_symbol.strip():
+        with st.container():
+            with st.spinner("Hisse verisi alınıyor..."):
+                stock_data, stock_error = fetch_stock_data(stock_symbol.strip().upper())
+            
+            if stock_error:
+                st.error(f"⚠️ Hisse verisi alınamadı: {stock_error}")
+                st.info("💡 Türk hisseleri için '.IS' eki kullanın (örn: THYAO.IS)")
+            elif stock_data is not None and not stock_data.empty:
+                # Metrikler
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    last_close = stock_data['Close'].iloc[-1]
+                    prev_close = stock_data['Close'].iloc[-2] if len(stock_data) > 1 else last_close
+                    change = ((last_close - prev_close) / prev_close) * 100
+                    st.metric(
+                        label="💰 Son Kapanış",
+                        value=f"${last_close:,.2f}",
+                        delta=f"{change:+.2f}%"
+                    )
+                
+                with col2:
+                    st.metric(label="📈 6 Ay Yüksek", value=f"${stock_data['High'].max():,.2f}")
+                
+                with col3:
+                    st.metric(label="📉 6 Ay Düşük", value=f"${stock_data['Low'].min():,.2f}")
+                
+                with col4:
+                    avg_volume = stock_data['Volume'].mean()
+                    st.metric(label="📊 Ort. Hacim", value=f"{avg_volume/1e6:,.1f}M")
+                
+                st.divider()
+                
+                # Grafik
+                st.subheader("📊 Fiyat Grafiği")
+                
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=stock_data.index,
+                    y=stock_data['Close'],
+                    mode='lines',
+                    name='Kapanış',
+                    line=dict(color='#4CAF50', width=2)
+                ))
+                
+                fig.update_layout(
+                    yaxis_title="Fiyat ($)",
+                    template="plotly_dark",
+                    height=400,
+                    margin=dict(l=0, r=0, t=20, b=20),
+                    showlegend=False
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                st.caption(f"📅 Veri: {stock_data.index[0].strftime('%d/%m/%Y')} - {stock_data.index[-1].strftime('%d/%m/%Y')}")
+            else:
+                st.warning("Hisse verisi bulunamadı.")
     else:
         st.info("👈 Yan menüden bir hisse sembolü girin.")
 
 
-# ==================== SEKME 3: ON-CHAIN ====================
-
-with tab_onchain:
-    st.subheader("⛓️ Ethereum Ağ Durumu")
+def show_onchain_page():
+    """On-Chain Analiz Sayfası"""
+    st.title("🔗 On-Chain Analiz")
+    st.caption("Ethereum ağı verileri ve metrikleri")
+    st.divider()
     
-    with st.spinner("Ethereum ağına bağlanılıyor..."):
-        eth_data, eth_error = fetch_ethereum_data()
-    
-    if eth_error:
-        st.error(f"⚠️ Ethereum verisi alınamadı: {eth_error}")
-        st.warning("Lütfen birkaç dakika bekleyip tekrar deneyin. RPC noktaları geçici olarak yanıt vermiyor olabilir.")
-    elif eth_data:
-        col1, col2 = st.columns(2)
+    with st.container():
+        st.subheader("⛓️ Ethereum Ağ Durumu")
         
-        with col1:
-            st.metric(
-                label="📦 Son Blok Numarası",
-                value=f"{eth_data['block_number']:,}"
-            )
+        with st.spinner("Ethereum ağına bağlanılıyor..."):
+            eth_data, eth_error = fetch_ethereum_data()
         
-        with col2:
-            gas_gwei = eth_data['gas_price_gwei']
-            # Gas seviyesi göstergesi
-            if gas_gwei < 20:
-                gas_status = "🟢 Düşük"
-            elif gas_gwei < 50:
-                gas_status = "🟡 Orta"
-            else:
-                gas_status = "🔴 Yüksek"
+        if eth_error:
+            st.error(f"⚠️ Ethereum verisi alınamadı: {eth_error}")
+        elif eth_data:
+            col1, col2 = st.columns(2)
             
-            st.metric(
-                label=f"⛽ Gas Ücreti ({gas_status})",
-                value=f"{gas_gwei} Gwei"
-            )
-        
-        st.divider()
-        
-        # Ek bilgi
-        st.info(f"""
-        **ℹ️ Ethereum Ağ Bilgisi**
-        
-        - **RPC Endpoint:** {eth_data['rpc_used']}
-        - **Gas Öneri:** {"İşlem yapmak için uygun zaman!" if gas_gwei < 30 else "Gas ücretleri yüksek, bekleyebilirsiniz."}
-        
-        *Veriler her dakika güncellenir.*
-        """)
-    else:
-        st.warning("Ethereum ağ verisi alınamadı.")
+            with col1:
+                st.metric(
+                    label="📦 Son Blok Numarası",
+                    value=f"{eth_data['block_number']:,}"
+                )
+            
+            with col2:
+                gas_gwei = eth_data['gas_price_gwei']
+                if gas_gwei < 20:
+                    gas_status = "🟢 Düşük"
+                elif gas_gwei < 50:
+                    gas_status = "🟡 Orta"
+                else:
+                    gas_status = "🔴 Yüksek"
+                
+                st.metric(
+                    label=f"⛽ Gas Ücreti ({gas_status})",
+                    value=f"{gas_gwei} Gwei"
+                )
+            
+            st.divider()
+            
+            # Bilgi kutusu
+            st.info(f"""
+            **ℹ️ Ethereum Ağ Bilgisi**
+            
+            - **RPC Endpoint:** {eth_data['rpc_used']}
+            - **Gas Öneri:** {"İşlem yapmak için uygun zaman!" if gas_gwei < 30 else "Gas ücretleri yüksek, bekleyebilirsiniz."}
+            
+            *Veriler her dakika güncellenir.*
+            """)
+        else:
+            st.warning("Ethereum ağ verisi alınamadı.")
+    
+    # Gelecek özellikler için placeholder
+    st.divider()
+    st.subheader("🔮 Yakında Eklenecek")
+    st.caption("• Whale Tracker  • DeFi TVL  • NFT Floor Prices")
 
 
-# ==================== FOOTER ====================
+# ==================== SIDEBAR NAVİGASYON ====================
 
-st.divider()
-st.caption("📊 Finans Terminali | Veriler yalnızca bilgilendirme amaçlıdır, yatırım tavsiyesi değildir.")
-st.caption(f"🕐 Son güncelleme: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+def render_sidebar():
+    """Dinamik sidebar - sayfa seçimi ve filtreler"""
+    
+    st.sidebar.title("📊 Finans Terminali")
+    st.sidebar.divider()
+    
+    # Ana Navigasyon
+    pages = ['🏠 Dashboard', '🪙 Kripto Terminal', '📈 Hisse Senedi', '🔗 On-Chain Analiz']
+    selected_page = st.sidebar.radio("Sayfa Seçin", pages, index=0, label_visibility="collapsed")
+    
+    st.sidebar.divider()
+    
+    # Sayfa-spesifik filtreler
+    if selected_page == '🪙 Kripto Terminal':
+        st.sidebar.subheader("⚙️ Kripto Ayarları")
+        
+        st.session_state['crypto_symbol'] = st.sidebar.selectbox(
+            "Parite Seç",
+            CRYPTO_SYMBOLS,
+            index=0
+        )
+        
+        st.session_state['crypto_timeframe'] = st.sidebar.selectbox(
+            "Zaman Dilimi",
+            list(TIMEFRAMES.keys()),
+            index=1
+        )
+    
+    elif selected_page == '📈 Hisse Senedi':
+        st.sidebar.subheader("⚙️ Hisse Ayarları")
+        
+        st.session_state['stock_symbol'] = st.sidebar.text_input(
+            "Sembol Gir",
+            value=st.session_state.get('stock_symbol', 'AAPL'),
+            help="Örnek: AAPL, GOOGL, MSFT, THYAO.IS"
+        )
+    
+    # Footer
+    st.sidebar.divider()
+    st.sidebar.caption("💡 Veriler cache'lenir. Kripto: 5dk, Hisse: 15dk, On-chain: 1dk")
+    st.sidebar.caption(f"🕐 {datetime.now().strftime('%H:%M:%S')}")
+    
+    return selected_page
+
+
+# ==================== ANA ROUTER ====================
+
+def main():
+    """Ana uygulama router'ı"""
+    
+    # Sidebar render et ve sayfa seçimini al
+    selected_page = render_sidebar()
+    
+    # Seçilen sayfayı göster
+    if selected_page == '🏠 Dashboard':
+        show_dashboard()
+    elif selected_page == '🪙 Kripto Terminal':
+        show_crypto_page()
+    elif selected_page == '📈 Hisse Senedi':
+        show_stock_page()
+    elif selected_page == '🔗 On-Chain Analiz':
+        show_onchain_page()
+    
+    # Footer
+    st.divider()
+    st.caption("📊 Finans Terminali v2.0 | Veriler yalnızca bilgilendirme amaçlıdır.")
+
+
+# Uygulamayı başlat
+if __name__ == "__main__":
+    main()
