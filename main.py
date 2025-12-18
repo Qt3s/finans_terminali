@@ -765,46 +765,59 @@ def render_onchain_page():
         # TVL Trendi
         st.subheader("📈 TVL Geçmişi")
         
-        tvl_history = protocol_data.get('tvl', [])
-        chain_tvls = protocol_data.get('chainTvls', {})
-        
-        if chain_tvls:
-            # En büyük chain'i bul
-            main_chain = max(chain_tvls.keys(), key=lambda x: chain_tvls[x].get('tvl', 0) if isinstance(chain_tvls[x], dict) else 0, default=None)
+        try:
+            chain_tvls = protocol_data.get('chainTvls', {})
             
-            if main_chain and 'tvl' in chain_tvls.get(main_chain, {}):
-                tvl_data = chain_tvls[main_chain].get('tvl', [])
-                if tvl_data and isinstance(tvl_data, list):
-                    df_tvl = pd.DataFrame(tvl_data)
-                    if 'date' in df_tvl.columns and 'totalLiquidityUSD' in df_tvl.columns:
-                        df_tvl['date'] = pd.to_datetime(df_tvl['date'], unit='s')
-                        
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatter(
-                            x=df_tvl['date'],
-                            y=df_tvl['totalLiquidityUSD'],
-                            mode='lines',
-                            fill='tozeroy',
-                            line=dict(color='#4CAF50', width=2),
-                            name='TVL'
-                        ))
-                        
-                        fig.update_layout(
-                            yaxis_title="TVL ($)",
-                            template="plotly_dark",
-                            height=300,
-                            margin=dict(l=0, r=0, t=20, b=20)
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
+            if chain_tvls and isinstance(chain_tvls, dict):
+                # En büyük chain'i güvenli şekilde bul
+                valid_chains = []
+                for chain_name, chain_data in chain_tvls.items():
+                    if isinstance(chain_data, dict):
+                        chain_tvl = chain_data.get('tvl', 0)
+                        if isinstance(chain_tvl, (int, float)):
+                            valid_chains.append((chain_name, chain_tvl))
+                
+                if valid_chains:
+                    main_chain = max(valid_chains, key=lambda x: x[1])[0]
+                    chain_data = chain_tvls.get(main_chain, {})
+                    
+                    if isinstance(chain_data, dict) and 'tvl' in chain_data:
+                        tvl_data = chain_data.get('tvl', [])
+                        if tvl_data and isinstance(tvl_data, list) and len(tvl_data) > 0:
+                            df_tvl = pd.DataFrame(tvl_data)
+                            if 'date' in df_tvl.columns and 'totalLiquidityUSD' in df_tvl.columns:
+                                df_tvl['date'] = pd.to_datetime(df_tvl['date'], unit='s')
+                                
+                                fig = go.Figure()
+                                fig.add_trace(go.Scatter(
+                                    x=df_tvl['date'],
+                                    y=df_tvl['totalLiquidityUSD'],
+                                    mode='lines',
+                                    fill='tozeroy',
+                                    line=dict(color='#4CAF50', width=2),
+                                    name='TVL'
+                                ))
+                                
+                                fig.update_layout(
+                                    yaxis_title="TVL ($)",
+                                    template="plotly_dark",
+                                    height=300,
+                                    margin=dict(l=0, r=0, t=20, b=20)
+                                )
+                                
+                                st.plotly_chart(fig, use_container_width=True)
+                            else:
+                                st.info("TVL geçmişi formatı desteklenmiyor.")
+                        else:
+                            st.info("TVL geçmişi bulunamadı.")
                     else:
-                        st.info("TVL geçmişi formatı desteklenmiyor.")
+                        st.info("Zincir TVL verisi mevcut değil.")
                 else:
-                    st.info("TVL geçmişi bulunamadı.")
+                    st.info("Geçerli zincir verisi bulunamadı.")
             else:
-                st.info("Zincir TVL verisi mevcut değil.")
-        else:
-            st.info("Detaylı TVL verisi bulunamadı.")
+                st.info("Detaylı TVL verisi bulunamadı.")
+        except Exception as e:
+            st.info(f"TVL geçmişi yüklenemedi.")
         
         # Treasury Bilgisi
         if treasury_data:
