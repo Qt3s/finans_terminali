@@ -3383,22 +3383,26 @@ def render_backtest_page():
             </div>
             """, unsafe_allow_html=True)
         
-        # İkinci satır metrikler
+        # İkinci satır metrikler (yeni metrikler varsa göster)
+        sortino = results.get('sortino_ratio', 0)
+        recovery = results.get('recovery_factor', 0)
+        calmar = results.get('calmar_ratio', 0)
+        win_rate = results.get('win_rate', 0)
+        
         metric_cols2 = st.columns(4)
         
         with metric_cols2[0]:
-            sortino_color = "#00C853" if results['sortino_ratio'] > 1.5 else "#FF9800" if results['sortino_ratio'] > 0 else "#FF1744"
+            sortino_color = "#00C853" if sortino > 1.5 else "#FF9800" if sortino > 0 else "#FF1744"
             st.markdown(f"""
             <div style="text-align: center; padding: 15px; background: {sortino_color}22; border-radius: 10px; border: 2px solid {sortino_color};">
                 <p style="margin: 0; color: #888;">📊 Sortino Ratio</p>
-                <h2 style="color: {sortino_color}; margin: 5px 0;">{results['sortino_ratio']:.2f}</h2>
+                <h2 style="color: {sortino_color}; margin: 5px 0;">{sortino:.2f}</h2>
             </div>
             """, unsafe_allow_html=True)
         
         with metric_cols2[1]:
-            rf = results['recovery_factor']
-            rf_display = f"{rf:.2f}" if rf != float('inf') else "∞"
-            rf_color = "#00C853" if rf > 2 else "#FF9800" if rf > 1 else "#FF1744"
+            rf_display = f"{recovery:.2f}" if recovery != float('inf') else "∞"
+            rf_color = "#00C853" if recovery > 2 else "#FF9800" if recovery > 1 else "#FF1744"
             st.markdown(f"""
             <div style="text-align: center; padding: 15px; background: {rf_color}22; border-radius: 10px; border: 2px solid {rf_color};">
                 <p style="margin: 0; color: #888;">🔄 Recovery Factor</p>
@@ -3407,20 +3411,20 @@ def render_backtest_page():
             """, unsafe_allow_html=True)
         
         with metric_cols2[2]:
-            calmar_color = "#00C853" if results['calmar_ratio'] > 1 else "#FF9800" if results['calmar_ratio'] > 0 else "#FF1744"
+            calmar_color = "#00C853" if calmar > 1 else "#FF9800" if calmar > 0 else "#FF1744"
             st.markdown(f"""
             <div style="text-align: center; padding: 15px; background: {calmar_color}22; border-radius: 10px; border: 2px solid {calmar_color};">
                 <p style="margin: 0; color: #888;">📈 Calmar Ratio</p>
-                <h2 style="color: {calmar_color}; margin: 5px 0;">{results['calmar_ratio']:.2f}</h2>
+                <h2 style="color: {calmar_color}; margin: 5px 0;">{calmar:.2f}</h2>
             </div>
             """, unsafe_allow_html=True)
         
         with metric_cols2[3]:
-            wr_color = "#00C853" if results['win_rate'] > 55 else "#FF9800" if results['win_rate'] > 45 else "#FF1744"
+            wr_color = "#00C853" if win_rate > 55 else "#FF9800" if win_rate > 45 else "#FF1744"
             st.markdown(f"""
             <div style="text-align: center; padding: 15px; background: {wr_color}22; border-radius: 10px; border: 2px solid {wr_color};">
                 <p style="margin: 0; color: #888;">🎯 Win Rate</p>
-                <h2 style="color: {wr_color}; margin: 5px 0;">{results['win_rate']:.1f}%</h2>
+                <h2 style="color: {wr_color}; margin: 5px 0;">{win_rate:.1f}%</h2>
             </div>
             """, unsafe_allow_html=True)
         
