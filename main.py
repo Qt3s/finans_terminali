@@ -338,6 +338,73 @@ def fetch_protocol_revenue(protocol_slug: str):
         return None, str(e)
 
 
+# ==================== ML-READY FEATURE ENGINEERING ====================
+
+def calculate_rsi(prices, period=14):
+    """RSI (Relative Strength Index) hesaplar."""
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+
+def prepare_ml_features(price_df, macro_df=None):
+    """
+    XGBoost/ML modeli için feature hazırlığı.
+    
+    Bu fonksiyon gelecekteki ML entegrasyonu için temel oluşturur.
+    
+    Args:
+        price_df: OHLCV verisi (timestamp, open, high, low, close, volume)
+        macro_df: Makro veriler (opsiyonel - DXY, bonds vb.)
+    
+    Returns:
+        DataFrame: ML modeli için hazır feature seti
+    
+    Features:
+    - Price: close, returns, log_returns
+    - Technical: RSI_14, EMA_20, EMA_50, EMA_200, volatility_20
+    - Macro: DXY, DXY_change (eğer sağlanırsa)
+    """
+    if price_df is None or price_df.empty:
+        return None
+    
+    features = price_df.copy()
+    
+    # Fiyat bazlı özellikler
+    features['returns'] = features['close'].pct_change()
+    features['log_returns'] = features['close'].apply(lambda x: x if x <= 0 else x).transform(lambda x: x.pct_change())
+    
+    # Volatilite (20 günlük)
+    features['volatility_20'] = features['returns'].rolling(window=20).std()
+    
+    # Teknik indikatörler
+    features['RSI_14'] = calculate_rsi(features['close'], 14)
+    features['EMA_20'] = features['close'].ewm(span=20, adjust=False).mean()
+    features['EMA_50'] = features['close'].ewm(span=50, adjust=False).mean()
+    features['EMA_200'] = features['close'].ewm(span=200, adjust=False).mean()
+    
+    # EMA sinyalleri (binary)
+    features['above_EMA_20'] = (features['close'] > features['EMA_20']).astype(int)
+    features['above_EMA_50'] = (features['close'] > features['EMA_50']).astype(int)
+    features['above_EMA_200'] = (features['close'] > features['EMA_200']).astype(int)
+    
+    # Makro veriler (opsiyonel)
+    if macro_df is not None and not macro_df.empty:
+        # Tarihleri normalize et
+        features['date'] = features['timestamp'].dt.date if 'timestamp' in features.columns else features.index.date
+        macro_df['date'] = macro_df.index.date if hasattr(macro_df.index, 'date') else macro_df.index
+        
+        # Merge
+        features = features.merge(macro_df[['date', 'DXY']], on='date', how='left')
+        features['DXY_change'] = features['DXY'].pct_change()
+    
+    return features.dropna()
+
+
 # ==================== BUFFETT SKOR HESAPLAMA ====================
 
 def calculate_buffett_score(mcap: float, tvl: float, treasury_data: dict = None):
@@ -475,6 +542,52 @@ def render_dashboard():
             gas = eth_data['gas_price_gwei']
             status = "🟢" if gas < 20 else "🟡" if gas < 50 else "🔴"
             st.metric(f"⛽ Gas {status}", f"{gas} Gwei")
+    
+    st.divider()
+    
+    # Piyasa Riski (DXY bazlı)
+    st.subheader("🌡️ Piyasa Riski (Buffett Pusulası)")
+    
+    macro_data = fetch_macro_data()
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if macro_data.get('DXY'):
+            dxy_val = macro_data['DXY']['value']
+            dxy_change = macro_data['DXY']['change']
+            
+            if dxy_val > 105:
+                risk_level = "🔴 Yüksek Risk"
+                risk_color = "#FF1744"
+            elif dxy_val > 100:
+                risk_level = "🟡 Orta Risk"
+                risk_color = "#FF9800"
+            else:
+                risk_level = "🟢 Düşük Risk"
+                risk_color = "#00C853"
+            
+            st.metric(f"💵 DXY ({risk_level})", f"{dxy_val:.2f}", f"{dxy_change:+.2f}%")
+        else:
+            st.metric("💵 DXY", "—")
+    
+    with col2:
+        if macro_data.get('VIX'):
+            vix_val = macro_data['VIX']['value']
+            vix_change = macro_data['VIX']['change']
+            
+            vix_status = "🟢" if vix_val < 20 else "🟡" if vix_val < 30 else "🔴"
+            st.metric(f"😱 VIX {vix_status}", f"{vix_val:.1f}", f"{vix_change:+.2f}%")
+        else:
+            st.metric("😱 VIX", "—")
+    
+    with col3:
+        if macro_data.get('US10Y'):
+            bond_val = macro_data['US10Y']['value']
+            bond_change = macro_data['US10Y']['change']
+            st.metric("📜 ABD 10Y", f"%{bond_val:.2f}", f"{bond_change:+.2f}%")
+        else:
+            st.metric("📜 ABD 10Y", "—")
 
 
 def render_crypto_page():
@@ -762,60 +875,58 @@ def render_onchain_page():
         
         st.divider()
         
-        # TVL Trendi
+        # TVL Trendi - Basitleştirilmiş yaklaşım
         st.subheader("📈 TVL Geçmişi")
         
         try:
-            chain_tvls = protocol_data.get('chainTvls', {})
+            # Doğrudan tvl dizisini kullan (chainTvls yerine)
+            tvl_history = protocol_data.get('tvl', [])
             
-            if chain_tvls and isinstance(chain_tvls, dict):
-                # En büyük chain'i güvenli şekilde bul
-                valid_chains = []
-                for chain_name, chain_data in chain_tvls.items():
-                    if isinstance(chain_data, dict):
-                        chain_tvl = chain_data.get('tvl', 0)
-                        if isinstance(chain_tvl, (int, float)):
-                            valid_chains.append((chain_name, chain_tvl))
+            # Eğer tvl bir liste değilse, farklı formatlara bak
+            if not isinstance(tvl_history, list):
+                # Belki bir sayı olarak gelmiştir - geçmişi çekilemez
+                tvl_history = []
+            
+            if tvl_history and len(tvl_history) > 5:
+                # TVL history formatı: [{"date": timestamp, "totalLiquidityUSD": value}, ...]
+                df_tvl = pd.DataFrame(tvl_history)
                 
-                if valid_chains:
-                    main_chain = max(valid_chains, key=lambda x: x[1])[0]
-                    chain_data = chain_tvls.get(main_chain, {})
+                # Farklı format kontrolleri
+                if 'date' in df_tvl.columns:
+                    df_tvl['date'] = pd.to_datetime(df_tvl['date'], unit='s')
                     
-                    if isinstance(chain_data, dict) and 'tvl' in chain_data:
-                        tvl_data = chain_data.get('tvl', [])
-                        if tvl_data and isinstance(tvl_data, list) and len(tvl_data) > 0:
-                            df_tvl = pd.DataFrame(tvl_data)
-                            if 'date' in df_tvl.columns and 'totalLiquidityUSD' in df_tvl.columns:
-                                df_tvl['date'] = pd.to_datetime(df_tvl['date'], unit='s')
-                                
-                                fig = go.Figure()
-                                fig.add_trace(go.Scatter(
-                                    x=df_tvl['date'],
-                                    y=df_tvl['totalLiquidityUSD'],
-                                    mode='lines',
-                                    fill='tozeroy',
-                                    line=dict(color='#4CAF50', width=2),
-                                    name='TVL'
-                                ))
-                                
-                                fig.update_layout(
-                                    yaxis_title="TVL ($)",
-                                    template="plotly_dark",
-                                    height=300,
-                                    margin=dict(l=0, r=0, t=20, b=20)
-                                )
-                                
-                                st.plotly_chart(fig, use_container_width=True)
-                            else:
-                                st.info("TVL geçmişi formatı desteklenmiyor.")
-                        else:
-                            st.info("TVL geçmişi bulunamadı.")
+                    # Değer kolonunu bul
+                    value_col = None
+                    for col in ['totalLiquidityUSD', 'tvl', 'value']:
+                        if col in df_tvl.columns:
+                            value_col = col
+                            break
+                    
+                    if value_col:
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(
+                            x=df_tvl['date'],
+                            y=df_tvl[value_col],
+                            mode='lines',
+                            fill='tozeroy',
+                            line=dict(color='#4CAF50', width=2),
+                            name='TVL'
+                        ))
+                        
+                        fig.update_layout(
+                            yaxis_title="TVL ($)",
+                            template="plotly_dark",
+                            height=300,
+                            margin=dict(l=0, r=0, t=20, b=20)
+                        )
+                        
+                        st.plotly_chart(fig, use_container_width=True)
                     else:
-                        st.info("Zincir TVL verisi mevcut değil.")
+                        st.info("TVL değer kolonu bulunamadı.")
                 else:
-                    st.info("Geçerli zincir verisi bulunamadı.")
+                    st.info("TVL geçmiş formatı desteklenmiyor.")
             else:
-                st.info("Detaylı TVL verisi bulunamadı.")
+                st.info("TVL geçmiş verisi bulunamadı veya yetersiz.")
         except Exception as e:
             st.info(f"TVL geçmişi yüklenemedi.")
         
