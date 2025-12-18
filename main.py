@@ -47,60 +47,123 @@ st.markdown("""
 
 # ==================== CACHING FONKSİYONLARI ====================
 
+# Desteklenen borsalar ve parite dönüşümleri
+EXCHANGE_CONFIGS = [
+    {
+        'name': 'kucoin',
+        'class': 'kucoin',
+        'options': {'enableRateLimit': True},
+        'symbol_map': {}  # Direkt kullan: BTC/USDT
+    },
+    {
+        'name': 'kraken',
+        'class': 'kraken',
+        'options': {'enableRateLimit': True},
+        'symbol_map': {
+            'BTC/USDT': 'BTC/USDT',
+            'ETH/USDT': 'ETH/USDT',
+            'SOL/USDT': 'SOL/USDT',
+            'XRP/USDT': 'XRP/USDT',
+            'ADA/USDT': 'ADA/USDT',
+            'DOGE/USDT': 'DOGE/USDT',
+            'BNB/USDT': 'BNB/USDT',  # Kraken'de olmayabilir, fallback
+        }
+    },
+]
+
+
+def get_exchange_instance(config):
+    """Borsa instance'ı oluşturur."""
+    import ccxt
+    exchange_class = getattr(ccxt, config['class'])
+    return exchange_class(config['options'])
+
+
 @st.cache_data(ttl=300, show_spinner=False)  # 5 dakika cache
 def fetch_crypto_ohlcv(symbol: str, timeframe: str, limit: int = 100):
     """
-    Binance'den OHLCV verisi çeker.
-    API key gerektirmez - herkese açık endpoint.
+    Birden fazla borsadan OHLCV verisi çeker (fallback mekanizması).
+    KuCoin -> Kraken sırasıyla dener.
     """
-    try:
-        import ccxt
-        exchange = ccxt.binance({
-            'enableRateLimit': True,
-            'options': {'defaultType': 'spot'}
-        })
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        return df, None
-    except Exception as e:
-        return None, str(e)
+    import ccxt
+    errors = []
+    
+    for config in EXCHANGE_CONFIGS:
+        try:
+            exchange = get_exchange_instance(config)
+            
+            # Sembol dönüşümü (gerekirse)
+            mapped_symbol = config['symbol_map'].get(symbol, symbol)
+            
+            ohlcv = exchange.fetch_ohlcv(mapped_symbol, timeframe, limit=limit)
+            
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            return df, None, config['name']  # Başarılı borsa adını da döndür
+            
+        except Exception as e:
+            errors.append(f"{config['name']}: {str(e)}")
+            continue
+    
+    # Tüm borsalar başarısız olduysa
+    return None, " | ".join(errors), None
 
 
 @st.cache_data(ttl=300, show_spinner=False)  # 5 dakika cache
 def fetch_crypto_ticker(symbol: str):
     """
-    Binance'den anlık fiyat bilgisi çeker.
+    Birden fazla borsadan anlık fiyat bilgisi çeker (fallback mekanizması).
+    KuCoin -> Kraken sırasıyla dener.
     """
-    try:
-        import ccxt
-        exchange = ccxt.binance({
-            'enableRateLimit': True,
-            'options': {'defaultType': 'spot'}
-        })
-        ticker = exchange.fetch_ticker(symbol)
-        return ticker, None
-    except Exception as e:
-        return None, str(e)
+    import ccxt
+    errors = []
+    
+    for config in EXCHANGE_CONFIGS:
+        try:
+            exchange = get_exchange_instance(config)
+            
+            # Sembol dönüşümü (gerekirse)
+            mapped_symbol = config['symbol_map'].get(symbol, symbol)
+            
+            ticker = exchange.fetch_ticker(mapped_symbol)
+            return ticker, None, config['name']  # Başarılı borsa adını da döndür
+            
+        except Exception as e:
+            errors.append(f"{config['name']}: {str(e)}")
+            continue
+    
+    # Tüm borsalar başarısız olduysa
+    return None, " | ".join(errors), None
 
 
-@st.cache_data(ttl=300, show_spinner=False)  # 5 dakika cache
+@st.cache_data(ttl=900, show_spinner=False)  # 15 dakika cache (rate limit için artırıldı)
 def fetch_stock_data(symbol: str, period: str = "6mo"):
     """
     Yahoo Finance'den hisse senedi verisi çeker.
+    Retry mekanizması ile rate limiting'e karşı koruma.
     """
-    try:
-        import yfinance as yf
-        ticker = yf.Ticker(symbol)
-        hist = ticker.history(period=period)
-        
-        if hist.empty:
-            return None, f"'{symbol}' sembolü için veri bulunamadı."
-        
-        return hist, None
-    except Exception as e:
-        return None, str(e)
+    import time
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period=period)
+            
+            if hist.empty:
+                return None, f"'{symbol}' sembolü için veri bulunamadı."
+            
+            return hist, None
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "rate" in error_msg or "too many" in error_msg:
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff: 1, 2, 4 saniye
+                    continue
+            return None, str(e)
+    
+    return None, "Rate limit aşıldı. Lütfen birkaç dakika bekleyin."
 
 
 @st.cache_data(ttl=60, show_spinner=False)  # 1 dakika cache (on-chain daha dinamik)
@@ -183,11 +246,14 @@ with tab_crypto:
     
     # Anlık fiyat bilgisi
     with st.spinner("Fiyat bilgisi alınıyor..."):
-        ticker_data, ticker_error = fetch_crypto_ticker(selected_crypto)
+        ticker_data, ticker_error, ticker_exchange = fetch_crypto_ticker(selected_crypto)
     
     if ticker_error:
         st.error(f"⚠️ Fiyat verisi alınamadı: {ticker_error}")
     elif ticker_data:
+        # Hangi borsadan geldiğini göster
+        st.caption(f"📡 Veri kaynağı: **{ticker_exchange.upper()}**")
+        
         col1, col2, col3 = st.columns(3)
         
         with col1:
@@ -211,11 +277,11 @@ with tab_crypto:
     
     # OHLCV Verisi ve Mum Grafiği
     with st.spinner("Grafik verisi yükleniyor..."):
-        ohlcv_data, ohlcv_error = fetch_crypto_ohlcv(selected_crypto, selected_timeframe)
+        ohlcv_data, ohlcv_error, ohlcv_exchange = fetch_crypto_ohlcv(selected_crypto, selected_timeframe)
     
     if ohlcv_error:
         st.error(f"⚠️ Grafik verisi alınamadı: {ohlcv_error}")
-        st.warning("Lütfen birkaç dakika bekleyip tekrar deneyin. Binance API'si geçici olarak yanıt vermiyor olabilir.")
+        st.warning("Lütfen birkaç dakika bekleyip tekrar deneyin veya başka bir parite seçin.")
     elif ohlcv_data is not None and not ohlcv_data.empty:
         # Plotly Candlestick Grafiği
         fig = go.Figure(data=[go.Candlestick(
