@@ -241,9 +241,20 @@ def calculate_buffett_score(mcap: float, tvl: float, treasury_data: dict = None)
     score = 10
     details = []
     
+    # Tip güvenliği
+    try:
+        tvl = float(tvl) if tvl else 0.0
+    except (TypeError, ValueError):
+        tvl = 0.0
+    
+    try:
+        mcap = float(mcap) if mcap else 0.0
+    except (TypeError, ValueError):
+        mcap = 0.0
+    
     # 1. Mcap/TVL Oranı
-    if tvl and tvl > 0:
-        mcap_tvl = mcap / tvl if mcap else 0
+    if tvl > 0:
+        mcap_tvl = mcap / tvl if mcap > 0 else 0
         
         if mcap_tvl > 5:
             score -= 4
@@ -262,26 +273,32 @@ def calculate_buffett_score(mcap: float, tvl: float, treasury_data: dict = None)
     
     # 2. Treasury Analizi
     if treasury_data:
-        total_treasury = treasury_data.get('tvl', 0)
+        try:
+            total_treasury = float(treasury_data.get('tvl', 0) or 0)
+        except (TypeError, ValueError):
+            total_treasury = 0.0
         
         if total_treasury > 100_000_000:  # 100M+
             details.append(f"🟢 Güçlü hazine (${total_treasury/1e6:.0f}M)")
         elif total_treasury > 10_000_000:  # 10M+
             score -= 1
             details.append(f"🟡 Orta hazine (${total_treasury/1e6:.0f}M)")
-        else:
+        elif total_treasury > 0:
             score -= 2
             details.append(f"🔴 Zayıf hazine (${total_treasury/1e6:.0f}M)")
+        else:
+            score -= 1
+            details.append("⚪ Hazine tutarı bilinmiyor")
     else:
         score -= 1
         details.append("⚪ Hazine verisi yok")
     
     # 3. TVL Trend (basit kontrol)
-    if tvl and tvl > 1_000_000_000:  # 1B+
+    if tvl > 1_000_000_000:  # 1B+
         details.append("🟢 Yüksek TVL ($1B+)")
-    elif tvl and tvl > 100_000_000:  # 100M+
+    elif tvl > 100_000_000:  # 100M+
         details.append("🟡 Orta TVL")
-    else:
+    elif tvl > 0:
         score -= 1
         details.append("🔴 Düşük TVL")
     
