@@ -3,21 +3,17 @@ Profesyonel Finans Terminali v2.0
 Modüler mimari, sidebar navigasyon, dinamik filtreler
 Streamlit Cloud için optimize edilmiş, mobil uyumlu dashboard
 """
-
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-
 # ==================== SAYFA KONFİGÜRASYONU ====================
-
 st.set_page_config(
     page_title="Finans Terminali",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
 # Custom CSS - Mobil ve masaüstü uyumu
 st.markdown("""
 <style>
@@ -58,10 +54,7 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
-
-
 # ==================== BORSA KONFİGÜRASYONU ====================
-
 EXCHANGE_CONFIGS = [
     {
         'name': 'kucoin',
@@ -84,20 +77,14 @@ EXCHANGE_CONFIGS = [
         }
     },
 ]
-
 CRYPTO_SYMBOLS = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT", "DOGE/USDT"]
 TIMEFRAMES = {"1 Saat": "1h", "4 Saat": "4h", "1 Gün": "1d", "1 Hafta": "1w"}
-
-
 # ==================== VERİ ÇEKİCİ FONKSİYONLAR ====================
-
 def get_exchange_instance(config):
     """Borsa instance'ı oluşturur."""
     import ccxt
     exchange_class = getattr(ccxt, config['class'])
     return exchange_class(config['options'])
-
-
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_crypto_ticker(symbol: str):
     """Birden fazla borsadan anlık fiyat bilgisi çeker (fallback)."""
@@ -115,8 +102,6 @@ def fetch_crypto_ticker(symbol: str):
             continue
     
     return None, " | ".join(errors), None
-
-
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_crypto_ohlcv(symbol: str, timeframe: str, limit: int = 100):
     """Birden fazla borsadan OHLCV verisi çeker (fallback)."""
@@ -137,8 +122,6 @@ def fetch_crypto_ohlcv(symbol: str, timeframe: str, limit: int = 100):
             continue
     
     return None, " | ".join(errors), None
-
-
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_stock_data(symbol: str, period: str = "6mo"):
     """Yahoo Finance'den hisse senedi verisi çeker."""
@@ -164,8 +147,6 @@ def fetch_stock_data(symbol: str, period: str = "6mo"):
             return None, str(e)
     
     return None, "Rate limit aşıldı. Lütfen bekleyin."
-
-
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_ethereum_data():
     """Ethereum ağından blok ve gas bilgisi çeker."""
@@ -197,10 +178,7 @@ def fetch_ethereum_data():
         return None, "Tüm RPC noktalarına bağlanılamadı."
     except Exception as e:
         return None, str(e)
-
-
 # ==================== SAYFA FONKSİYONLARI ====================
-
 def show_dashboard():
     """Ana Dashboard - Piyasa Özeti"""
     st.title("🏠 Piyasa Özeti")
@@ -309,18 +287,34 @@ def show_dashboard():
                 )
         else:
             st.warning("Ethereum ağ verisi alınamadı.")
-
-
 def show_crypto_page():
     """Kripto Terminal Sayfası"""
     st.title("🪙 Kripto Terminal")
     
-    # Session state'den seçimleri al
-    selected_crypto = st.session_state.get('crypto_symbol', 'BTC/USDT')
-    selected_tf_label = st.session_state.get('crypto_timeframe', '4 Saat')
+    # Sayfa içi filtreler
+    col_filter1, col_filter2, col_spacer = st.columns([2, 2, 4])
+    
+    with col_filter1:
+        selected_crypto = st.selectbox(
+            "Parite Seç",
+            CRYPTO_SYMBOLS,
+            index=CRYPTO_SYMBOLS.index(st.session_state.get('crypto_symbol', 'BTC/USDT')) if st.session_state.get('crypto_symbol', 'BTC/USDT') in CRYPTO_SYMBOLS else 0,
+            key='crypto_symbol_select'
+        )
+        st.session_state['crypto_symbol'] = selected_crypto
+    
+    with col_filter2:
+        tf_list = list(TIMEFRAMES.keys())
+        selected_tf_label = st.selectbox(
+            "Zaman Dilimi",
+            tf_list,
+            index=tf_list.index(st.session_state.get('crypto_timeframe', '4 Saat')) if st.session_state.get('crypto_timeframe', '4 Saat') in tf_list else 1,
+            key='crypto_tf_select'
+        )
+        st.session_state['crypto_timeframe'] = selected_tf_label
+    
     selected_timeframe = TIMEFRAMES.get(selected_tf_label, '4h')
     
-    st.caption(f"📡 {selected_crypto} | {selected_tf_label}")
     st.divider()
     
     # Anlık Fiyat Bilgisi
@@ -390,18 +384,26 @@ def show_crypto_page():
             st.caption(f"📊 Toplam Hacim (son {len(ohlcv_data)} mum): {total_volume:,.0f}")
         else:
             st.warning("Grafik verisi yüklenemedi.")
-
-
 def show_stock_page():
     """Hisse Senedi Sayfası"""
     st.title("📈 Hisse Senedi Terminali")
     
-    stock_symbol = st.session_state.get('stock_symbol', 'AAPL')
+    # Sayfa içi filtre
+    col_filter, col_spacer = st.columns([3, 5])
     
-    st.caption(f"📊 {stock_symbol.upper()} - Son 6 Ay")
+    with col_filter:
+        stock_symbol = st.text_input(
+            "Hisse Sembolü Gir",
+            value=st.session_state.get('stock_symbol', 'AAPL'),
+            help="Örnek: AAPL, GOOGL, MSFT, THYAO.IS (Türk hisseleri için .IS ekleyin)",
+            key='stock_symbol_input'
+        )
+        st.session_state['stock_symbol'] = stock_symbol
+    
     st.divider()
     
     if stock_symbol.strip():
+        st.caption(f"📊 {stock_symbol.upper()} - Son 6 Ay")
         with st.container():
             with st.spinner("Hisse verisi alınıyor..."):
                 stock_data, stock_error = fetch_stock_data(stock_symbol.strip().upper())
@@ -461,9 +463,7 @@ def show_stock_page():
             else:
                 st.warning("Hisse verisi bulunamadı.")
     else:
-        st.info("👈 Yan menüden bir hisse sembolü girin.")
-
-
+        st.info("☝️ Yukarıdan bir hisse sembolü girin.")
 def show_onchain_page():
     """On-Chain Analiz Sayfası"""
     st.title("🔗 On-Chain Analiz")
@@ -519,12 +519,9 @@ def show_onchain_page():
     st.divider()
     st.subheader("🔮 Yakında Eklenecek")
     st.caption("• Whale Tracker  • DeFi TVL  • NFT Floor Prices")
-
-
 # ==================== SIDEBAR NAVİGASYON ====================
-
 def render_sidebar():
-    """Dinamik sidebar - sayfa seçimi ve filtreler"""
+    """Sidebar - sadece navigasyon"""
     
     st.sidebar.title("📊 Finans Terminali")
     st.sidebar.divider()
@@ -533,43 +530,14 @@ def render_sidebar():
     pages = ['🏠 Dashboard', '🪙 Kripto Terminal', '📈 Hisse Senedi', '🔗 On-Chain Analiz']
     selected_page = st.sidebar.radio("Sayfa Seçin", pages, index=0, label_visibility="collapsed")
     
-    st.sidebar.divider()
-    
-    # Sayfa-spesifik filtreler
-    if selected_page == '🪙 Kripto Terminal':
-        st.sidebar.subheader("⚙️ Kripto Ayarları")
-        
-        st.session_state['crypto_symbol'] = st.sidebar.selectbox(
-            "Parite Seç",
-            CRYPTO_SYMBOLS,
-            index=0
-        )
-        
-        st.session_state['crypto_timeframe'] = st.sidebar.selectbox(
-            "Zaman Dilimi",
-            list(TIMEFRAMES.keys()),
-            index=1
-        )
-    
-    elif selected_page == '📈 Hisse Senedi':
-        st.sidebar.subheader("⚙️ Hisse Ayarları")
-        
-        st.session_state['stock_symbol'] = st.sidebar.text_input(
-            "Sembol Gir",
-            value=st.session_state.get('stock_symbol', 'AAPL'),
-            help="Örnek: AAPL, GOOGL, MSFT, THYAO.IS"
-        )
-    
     # Footer
     st.sidebar.divider()
-    st.sidebar.caption("💡 Veriler cache'lenir. Kripto: 5dk, Hisse: 15dk, On-chain: 1dk")
+    st.sidebar.caption("💡 Veriler cache'lenir.")
+    st.sidebar.caption("Kripto: 5dk | Hisse: 15dk | On-chain: 1dk")
     st.sidebar.caption(f"🕐 {datetime.now().strftime('%H:%M:%S')}")
     
     return selected_page
-
-
 # ==================== ANA ROUTER ====================
-
 def main():
     """Ana uygulama router'ı"""
     
@@ -589,8 +557,6 @@ def main():
     # Footer
     st.divider()
     st.caption("📊 Finans Terminali v2.0 | Veriler yalnızca bilgilendirme amaçlıdır.")
-
-
 # Uygulamayı başlat
 if __name__ == "__main__":
     main()
