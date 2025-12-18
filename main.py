@@ -2829,53 +2829,100 @@ def render_ai_page():
             df = btc_hist[['Close', 'Volume', 'High', 'Low']].copy()
             df = df.astype('float32')  # Bellek optimizasyonu
             
-            # Teknik İndikatörler
+            # ===== STATIONARITY: Değişim oranları =====
             df['returns'] = df['Close'].pct_change()
             df['log_returns'] = np.log(df['Close'] / df['Close'].shift(1))
-            df['volatility_20'] = df['returns'].rolling(window=20).std()
+            df['volume_pct'] = df['Volume'].pct_change()
+            df['high_pct'] = df['High'].pct_change()
+            df['low_pct'] = df['Low'].pct_change()
             
-            # RSI
+            # ===== VOLATILITY: ATR (Average True Range) =====
+            df['tr1'] = df['High'] - df['Low']
+            df['tr2'] = abs(df['High'] - df['Close'].shift(1))
+            df['tr3'] = abs(df['Low'] - df['Close'].shift(1))
+            df['true_range'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+            df['ATR_14'] = df['true_range'].rolling(window=14).mean()
+            df['ATR_pct'] = df['ATR_14'] / df['Close']  # Normalize
+            df = df.drop(['tr1', 'tr2', 'tr3', 'true_range'], axis=1)
+            
+            # ===== MOMENTUM: ROC (Rate of Change) =====
+            df['ROC_5'] = (df['Close'] - df['Close'].shift(5)) / df['Close'].shift(5) * 100
+            df['ROC_10'] = (df['Close'] - df['Close'].shift(10)) / df['Close'].shift(10) * 100
+            df['ROC_20'] = (df['Close'] - df['Close'].shift(20)) / df['Close'].shift(20) * 100
+            
+            # ===== VWAP (Volume Weighted Average Price) =====
+            df['typical_price'] = (df['High'] + df['Low'] + df['Close']) / 3
+            df['vwap'] = (df['typical_price'] * df['Volume']).rolling(20).sum() / df['Volume'].rolling(20).sum()
+            df['vwap_diff'] = (df['Close'] - df['vwap']) / df['vwap'] * 100  # VWAP'tan uzaklık
+            df = df.drop(['typical_price', 'vwap'], axis=1)
+            
+            # ===== VOLATILITY =====
+            df['volatility_10'] = df['returns'].rolling(window=10).std()
+            df['volatility_20'] = df['returns'].rolling(window=20).std()
+            df['volatility_ratio'] = df['volatility_10'] / df['volatility_20']
+            
+            # ===== RSI =====
             delta = df['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
             rs = gain / loss
             df['RSI_14'] = 100 - (100 / (1 + rs))
+            df['RSI_normalized'] = (df['RSI_14'] - 50) / 50  # -1 to 1 arası
             
-            # EMA
+            # ===== EMA Sinyalleri =====
             df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
             df['EMA_50'] = df['Close'].ewm(span=50, adjust=False).mean()
             df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
-            
-            # EMA Sinyalleri
+            df['ema_20_diff'] = (df['Close'] - df['EMA_20']) / df['EMA_20'] * 100
+            df['ema_50_diff'] = (df['Close'] - df['EMA_50']) / df['EMA_50'] * 100
             df['ema_signal_20_50'] = (df['EMA_20'] > df['EMA_50']).astype(int)
             df['ema_signal_50_200'] = (df['EMA_50'] > df['EMA_200']).astype(int)
+            df = df.drop(['EMA_20', 'EMA_50', 'EMA_200'], axis=1)
             
-            # Price momentum
-            df['momentum_5'] = df['Close'].pct_change(5)
-            df['momentum_10'] = df['Close'].pct_change(10)
-            df['momentum_20'] = df['Close'].pct_change(20)
+            # ===== LAG FEATURES =====
+            for lag in [1, 2, 3]:
+                df[f'returns_lag_{lag}'] = df['returns'].shift(lag)
+                df[f'volume_pct_lag_{lag}'] = df['volume_pct'].shift(lag)
+                df[f'RSI_lag_{lag}'] = df['RSI_normalized'].shift(lag)
             
-            # Volatility
-            df['high_low_ratio'] = df['High'] / df['Low']
-            df['volume_change'] = df['Volume'].pct_change()
+            # ===== MACRO LAG FEATURES =====
+            if 'master_features_final' in st.session_state:
+                macro_features = st.session_state['master_features_final']
+                for key, value in macro_features.items():
+                    df[f'macro_{key}'] = float(value)
+                # DXY, VIX lag features
+                if 'macro_dxy' in df.columns:
+                    for lag in [1, 2, 3]:
+                        df[f'macro_dxy_lag_{lag}'] = df['macro_dxy'].shift(lag)
+                if 'macro_vix' in df.columns:
+                    for lag in [1, 2, 3]:
+                        df[f'macro_vix_lag_{lag}'] = df['macro_vix'].shift(lag)
             
-            # Target: 5 periyot sonraki getiri
+            # ===== MULTI-CLASS TARGET =====
             df['future_return'] = df['Close'].shift(-5) / df['Close'] - 1
+            return_std = df['future_return'].std()
+            threshold = return_std * 0.5
+            
+            # Multi-class: -1 (Aşağı), 0 (Nötr), 1 (Yukarı)
+            df['target_multi'] = 0  # Nötr
+            df.loc[df['future_return'] > threshold, 'target_multi'] = 1  # Yukarı
+            df.loc[df['future_return'] < -threshold, 'target_multi'] = -1  # Aşağı
+            
+            # Binary target (fallback)
             df['target'] = (df['future_return'] > 0).astype(int)
             
             # NaN temizliği
             df = df.dropna()
             
-            # Session state'e makro veriler varsa ekle
-            if 'master_features_final' in st.session_state:
-                macro_features = st.session_state['master_features_final']
-                for key, value in macro_features.items():
-                    df[f'macro_{key}'] = float(value)
-            
-            st.success(f"✅ {len(df)} satır veri hazırlandı ({df.shape[1]} feature)")
-            
             # Feature listesi
-            feature_cols = [col for col in df.columns if col not in ['Close', 'Volume', 'High', 'Low', 'future_return', 'target']]
+            exclude_cols = ['Close', 'Volume', 'High', 'Low', 'future_return', 'target', 'target_multi']
+            feature_cols = [col for col in df.columns if col not in exclude_cols]
+            
+            st.success(f"✅ {len(df)} satır veri hazırlandı ({len(feature_cols)} feature)")
+            
+            # Multi-class dağılımı
+            target_dist = df['target_multi'].value_counts()
+            st.caption(f"Target dağılımı: ⬆️ Yukarı: {target_dist.get(1, 0)}, ➡️ Nötr: {target_dist.get(0, 0)}, ⬇️ Aşağı: {target_dist.get(-1, 0)}")
             
         except Exception as e:
             st.error(f"Veri hazırlama hatası: {str(e)}")
@@ -2905,6 +2952,7 @@ def render_ai_page():
             try:
                 from xgboost import XGBClassifier
                 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+                from sklearn.preprocessing import StandardScaler
                 from sklearn.metrics import accuracy_score
                 import numpy as np
                 
@@ -2912,46 +2960,92 @@ def render_ai_page():
                 X = df[feature_cols].astype('float32')
                 y = df['target']
                 
+                # ===== StandardScaler normalizasyon =====
+                scaler = StandardScaler()
+                X_scaled = pd.DataFrame(
+                    scaler.fit_transform(X),
+                    columns=X.columns,
+                    index=X.index
+                )
+                
+                # inf/nan temizliği
+                X_scaled = X_scaled.replace([np.inf, -np.inf], 0).fillna(0)
+                
                 # TimeSeriesSplit cross-validation (overfitting önleme)
                 tscv = TimeSeriesSplit(n_splits=5)
                 
                 # XGBoost modeli
                 model = XGBClassifier(
-                    n_estimators=100,
-                    max_depth=5,
-                    learning_rate=0.1,
+                    n_estimators=150,
+                    max_depth=6,
+                    learning_rate=0.05,
                     objective='binary:logistic',
                     eval_metric='logloss',
                     use_label_encoder=False,
                     random_state=42,
-                    n_jobs=-1
+                    n_jobs=-1,
+                    subsample=0.8,
+                    colsample_bytree=0.8
                 )
                 
-                # Cross-validation skorları
-                cv_scores = cross_val_score(model, X, y, cv=tscv, scoring='accuracy')
-                avg_cv_score = np.mean(cv_scores)
-                
-                # Final model eğitimi (tüm veri ile)
-                # Son 200'ü test için ayır
-                train_size = len(X) - 200
-                X_train, X_test = X.iloc[:train_size], X.iloc[train_size:]
+                # İlk eğitim (feature importance için)
+                train_size = len(X_scaled) - 200
+                X_train, X_test = X_scaled.iloc[:train_size], X_scaled.iloc[train_size:]
                 y_train, y_test = y.iloc[:train_size], y.iloc[train_size:]
                 
                 model.fit(X_train, y_train)
                 
+                # ===== Feature Selection: En düşük %20'yi ele =====
+                importances = model.feature_importances_
+                importance_df = pd.DataFrame({
+                    'feature': feature_cols,
+                    'importance': importances
+                }).sort_values('importance', ascending=False)
+                
+                # En iyi %80'i seç
+                n_keep = int(len(feature_cols) * 0.8)
+                selected_features = importance_df.head(n_keep)['feature'].tolist()
+                
+                # Seçilen feature'larla tekrar eğit
+                X_train_selected = X_train[selected_features]
+                X_test_selected = X_test[selected_features]
+                
+                # Final model
+                model_final = XGBClassifier(
+                    n_estimators=150,
+                    max_depth=6,
+                    learning_rate=0.05,
+                    objective='binary:logistic',
+                    eval_metric='logloss',
+                    use_label_encoder=False,
+                    random_state=42,
+                    n_jobs=-1,
+                    subsample=0.8,
+                    colsample_bytree=0.8
+                )
+                
+                # Cross-validation skorları
+                cv_scores = cross_val_score(model_final, X_scaled[selected_features], y, cv=tscv, scoring='accuracy')
+                avg_cv_score = np.mean(cv_scores)
+                
+                model_final.fit(X_train_selected, y_train)
+                
                 # Test accuracy
-                y_pred = model.predict(X_test)
+                y_pred = model_final.predict(X_test_selected)
                 test_accuracy = accuracy_score(y_test, y_pred)
                 
                 # Session state'e kaydet
-                st.session_state.xgb_model = model
-                st.session_state.xgb_features = feature_cols
+                st.session_state.xgb_model = model_final
+                st.session_state.xgb_features = selected_features
+                st.session_state.xgb_scaler = scaler
                 st.session_state.xgb_accuracy = test_accuracy
                 st.session_state.xgb_cv_score = avg_cv_score
-                st.session_state.xgb_X_test = X_test
-                st.session_state.xgb_last_row = X.iloc[-1:]
+                st.session_state.xgb_X_test = X_test_selected
+                st.session_state.xgb_last_row = X_scaled[selected_features].iloc[-1:]
+                st.session_state.xgb_importance = importance_df
                 
                 st.success(f"✅ Model eğitildi!")
+                st.write(f"**Feature Sayısı**: {len(feature_cols)} → {len(selected_features)} (en iyi %80)")
                 st.write(f"**Cross-Validation (5-Fold)**: {avg_cv_score:.1%} ± {np.std(cv_scores):.1%}")
                 st.write(f"**Test Accuracy**: {test_accuracy:.1%}")
                 
