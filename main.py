@@ -82,6 +82,103 @@ DEFI_PROTOCOLS = {
 }
 
 
+# ==================== VERİ TEMİZLİĞİ UTILITIES ====================
+
+def clean_dataframe(df, method='ffill_interpolate'):
+    """
+    DataFrame'deki NaN ve inf değerlerini temizler.
+    
+    Args:
+        df: Temizlenecek DataFrame
+        method: 'ffill', 'interpolate', veya 'ffill_interpolate'
+    
+    Returns:
+        Temizlenmiş DataFrame
+    """
+    import numpy as np
+    
+    df = df.copy()
+    
+    # Inf değerleri NaN'a çevir
+    df = df.replace([np.inf, -np.inf], np.nan)
+    
+    if method == 'ffill':
+        df = df.ffill().bfill()
+    elif method == 'interpolate':
+        df = df.interpolate(method='linear').ffill().bfill()
+    elif method == 'ffill_interpolate':
+        # Önce forward fill, sonra interpolasyon
+        df = df.ffill()
+        df = df.interpolate(method='linear')
+        df = df.bfill()  # Başlangıç NaN'ları için
+    
+    return df
+
+
+def apply_median_filter(series, window: int = 5, threshold: float = 3.0):
+    """
+    Outlier/spike tespiti ve düzeltmesi için medyan filtre.
+    
+    Args:
+        series: Pandas Series
+        window: Medyan pencere boyutu
+        threshold: Standart sapma eşiği (3 = %99.7 güven)
+    
+    Returns:
+        Filtrelenmiş Series
+    """
+    import numpy as np
+    import pandas as pd
+    
+    series = series.copy()
+    
+    # Rolling medyan ve std
+    rolling_median = series.rolling(window=window, center=True, min_periods=1).median()
+    rolling_std = series.rolling(window=window, center=True, min_periods=1).std()
+    
+    # Outlier tespiti
+    diff = np.abs(series - rolling_median)
+    outliers = diff > (threshold * rolling_std)
+    
+    # Outlier'ları medyan ile değiştir
+    series[outliers] = rolling_median[outliers]
+    
+    return series
+
+
+def merge_time_series(dfs: list, how: str = 'outer', fill_method: str = 'ffill_interpolate'):
+    """
+    Farklı zaman serilerini birleştirir ve hizalar.
+    
+    Args:
+        dfs: DataFrame listesi (her biri DatetimeIndex olmalı)
+        how: 'inner' veya 'outer' merge
+        fill_method: NaN doldurma metodu
+    
+    Returns:
+        Birleştirilmiş DataFrame
+    """
+    import pandas as pd
+    
+    if not dfs:
+        return pd.DataFrame()
+    
+    # İlk DataFrame ile başla
+    result = dfs[0].copy()
+    
+    # Diğerlerini birleştir
+    for df in dfs[1:]:
+        result = result.join(df, how=how, rsuffix='_dup')
+        
+        # Duplicate sütunları kaldır
+        result = result.loc[:, ~result.columns.str.endswith('_dup')]
+    
+    # Temizle
+    result = clean_dataframe(result, method=fill_method)
+    
+    return result
+
+
 # ==================== VERİ ÇEKİCİ FONKSİYONLAR ====================
 
 def get_exchange_instance(config):
@@ -2807,17 +2904,16 @@ def render_ai_page():
         with st.spinner("Model eğitiliyor... (Bu işlem 30-60 saniye sürebilir)"):
             try:
                 from xgboost import XGBClassifier
-                from sklearn.model_selection import train_test_split
-                from sklearn.metrics import accuracy_score, classification_report
+                from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+                from sklearn.metrics import accuracy_score
+                import numpy as np
                 
                 # Feature ve target ayır
                 X = df[feature_cols].astype('float32')
                 y = df['target']
                 
-                # Train/Test split (son 200 test için)
-                train_size = len(X) - 200
-                X_train, X_test = X.iloc[:train_size], X.iloc[train_size:]
-                y_train, y_test = y.iloc[:train_size], y.iloc[train_size:]
+                # TimeSeriesSplit cross-validation (overfitting önleme)
+                tscv = TimeSeriesSplit(n_splits=5)
                 
                 # XGBoost modeli
                 model = XGBClassifier(
@@ -2831,20 +2927,33 @@ def render_ai_page():
                     n_jobs=-1
                 )
                 
+                # Cross-validation skorları
+                cv_scores = cross_val_score(model, X, y, cv=tscv, scoring='accuracy')
+                avg_cv_score = np.mean(cv_scores)
+                
+                # Final model eğitimi (tüm veri ile)
+                # Son 200'ü test için ayır
+                train_size = len(X) - 200
+                X_train, X_test = X.iloc[:train_size], X.iloc[train_size:]
+                y_train, y_test = y.iloc[:train_size], y.iloc[train_size:]
+                
                 model.fit(X_train, y_train)
                 
-                # Accuracy
+                # Test accuracy
                 y_pred = model.predict(X_test)
-                accuracy = accuracy_score(y_test, y_pred)
+                test_accuracy = accuracy_score(y_test, y_pred)
                 
                 # Session state'e kaydet
                 st.session_state.xgb_model = model
                 st.session_state.xgb_features = feature_cols
-                st.session_state.xgb_accuracy = accuracy
+                st.session_state.xgb_accuracy = test_accuracy
+                st.session_state.xgb_cv_score = avg_cv_score
                 st.session_state.xgb_X_test = X_test
                 st.session_state.xgb_last_row = X.iloc[-1:]
                 
-                st.success(f"✅ Model eğitildi! Test Accuracy: **{accuracy:.1%}**")
+                st.success(f"✅ Model eğitildi!")
+                st.write(f"**Cross-Validation (5-Fold)**: {avg_cv_score:.1%} ± {np.std(cv_scores):.1%}")
+                st.write(f"**Test Accuracy**: {test_accuracy:.1%}")
                 
             except ImportError:
                 st.error("❌ XGBoost kütüphanesi yüklü değil. requirements.txt'i kontrol edin.")
@@ -3044,6 +3153,24 @@ def run_backtest(predictions, prices, fee: float = 0.001) -> dict:
     total_trades = np.sum(strategy_returns != 0)
     win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
     
+    # Sortino Ratio (sadece negatif volatilite)
+    negative_returns = strategy_returns[strategy_returns < 0]
+    downside_std = np.std(negative_returns) if len(negative_returns) > 0 else 0
+    if downside_std > 0:
+        sortino_ratio = (np.mean(strategy_returns) / downside_std) * np.sqrt(252)
+    else:
+        sortino_ratio = 0
+    
+    # Recovery Factor (toplam getiri / max drawdown)
+    if max_drawdown > 0:
+        recovery_factor = total_strategy_return / max_drawdown
+    else:
+        recovery_factor = float('inf') if total_strategy_return > 0 else 0
+    
+    # Calmar Ratio (yıllık getiri / max drawdown)
+    annual_return = total_strategy_return  # Basitleştirilmiş
+    calmar_ratio = annual_return / max_drawdown if max_drawdown > 0 else 0
+    
     return {
         'strategy_returns': strategy_returns,
         'cumulative_strategy': cumulative_strategy,
@@ -3051,7 +3178,10 @@ def run_backtest(predictions, prices, fee: float = 0.001) -> dict:
         'total_strategy_return': total_strategy_return,
         'total_buyhold_return': total_buyhold_return,
         'sharpe_ratio': sharpe_ratio,
+        'sortino_ratio': sortino_ratio,
         'max_drawdown': max_drawdown,
+        'recovery_factor': recovery_factor,
+        'calmar_ratio': calmar_ratio,
         'total_trades': int(trades),
         'win_rate': win_rate,
         'total_fees': trades * fee * 100
@@ -3250,6 +3380,47 @@ def render_backtest_page():
             <div style="text-align: center; padding: 15px; background: {dd_color}22; border-radius: 10px; border: 2px solid {dd_color};">
                 <p style="margin: 0; color: #888;">📉 Max Drawdown</p>
                 <h2 style="color: {dd_color}; margin: 5px 0;">{results['max_drawdown']:.1f}%</h2>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # İkinci satır metrikler
+        metric_cols2 = st.columns(4)
+        
+        with metric_cols2[0]:
+            sortino_color = "#00C853" if results['sortino_ratio'] > 1.5 else "#FF9800" if results['sortino_ratio'] > 0 else "#FF1744"
+            st.markdown(f"""
+            <div style="text-align: center; padding: 15px; background: {sortino_color}22; border-radius: 10px; border: 2px solid {sortino_color};">
+                <p style="margin: 0; color: #888;">📊 Sortino Ratio</p>
+                <h2 style="color: {sortino_color}; margin: 5px 0;">{results['sortino_ratio']:.2f}</h2>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with metric_cols2[1]:
+            rf = results['recovery_factor']
+            rf_display = f"{rf:.2f}" if rf != float('inf') else "∞"
+            rf_color = "#00C853" if rf > 2 else "#FF9800" if rf > 1 else "#FF1744"
+            st.markdown(f"""
+            <div style="text-align: center; padding: 15px; background: {rf_color}22; border-radius: 10px; border: 2px solid {rf_color};">
+                <p style="margin: 0; color: #888;">🔄 Recovery Factor</p>
+                <h2 style="color: {rf_color}; margin: 5px 0;">{rf_display}</h2>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with metric_cols2[2]:
+            calmar_color = "#00C853" if results['calmar_ratio'] > 1 else "#FF9800" if results['calmar_ratio'] > 0 else "#FF1744"
+            st.markdown(f"""
+            <div style="text-align: center; padding: 15px; background: {calmar_color}22; border-radius: 10px; border: 2px solid {calmar_color};">
+                <p style="margin: 0; color: #888;">📈 Calmar Ratio</p>
+                <h2 style="color: {calmar_color}; margin: 5px 0;">{results['calmar_ratio']:.2f}</h2>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with metric_cols2[3]:
+            wr_color = "#00C853" if results['win_rate'] > 55 else "#FF9800" if results['win_rate'] > 45 else "#FF1744"
+            st.markdown(f"""
+            <div style="text-align: center; padding: 15px; background: {wr_color}22; border-radius: 10px; border: 2px solid {wr_color};">
+                <p style="margin: 0; color: #888;">🎯 Win Rate</p>
+                <h2 style="color: {wr_color}; margin: 5px 0;">{results['win_rate']:.1f}%</h2>
             </div>
             """, unsafe_allow_html=True)
         
