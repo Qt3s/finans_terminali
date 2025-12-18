@@ -265,12 +265,13 @@ def fetch_macro_data():
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_correlation_data(crypto_symbol: str = "BTC-USD", days: int = 30):
+def fetch_correlation_data(crypto_symbol: str = "BTC-USD", days: int = 60):
     """DXY ve Kripto arasındaki korelasyonu hesaplar."""
     import yfinance as yf
     import numpy as np
     
     try:
+        # Daha uzun periyot çek (hafta sonları için)
         dxy = yf.Ticker('DX-Y.NYB')
         crypto = yf.Ticker(crypto_symbol)
         
@@ -280,18 +281,34 @@ def fetch_correlation_data(crypto_symbol: str = "BTC-USD", days: int = 30):
         if dxy_hist.empty or crypto_hist.empty:
             return None, "Veri yetersiz"
         
-        # Tarihleri hizala
+        # Tarihleri sadece güne normalize et (saat bilgisini kaldır)
+        dxy_hist.index = dxy_hist.index.normalize()
+        crypto_hist.index = crypto_hist.index.normalize()
+        
+        # Günlük kapanış getirilerini hesapla
         dxy_returns = dxy_hist['Close'].pct_change().dropna()
         crypto_returns = crypto_hist['Close'].pct_change().dropna()
         
-        # Ortak tarihleri bul
+        # Ortak tarihleri bul (sadece DXY'nin işlem gördüğü günler)
         common_dates = dxy_returns.index.intersection(crypto_returns.index)
         
-        if len(common_dates) < 10:
-            return None, "Yeterli ortak veri yok"
-        
-        dxy_aligned = dxy_returns.loc[common_dates]
-        crypto_aligned = crypto_returns.loc[common_dates]
+        if len(common_dates) < 5:
+            # Alternatif: resample ile haftalık korelasyon
+            dxy_weekly = dxy_hist['Close'].resample('W').last().pct_change().dropna()
+            crypto_weekly = crypto_hist['Close'].resample('W').last().pct_change().dropna()
+            
+            common_weeks = dxy_weekly.index.intersection(crypto_weekly.index)
+            
+            if len(common_weeks) < 3:
+                return None, "Yeterli veri yok"
+            
+            dxy_aligned = dxy_weekly.loc[common_weeks]
+            crypto_aligned = crypto_weekly.loc[common_weeks]
+            period_label = f"{len(common_weeks)} hafta"
+        else:
+            dxy_aligned = dxy_returns.loc[common_dates]
+            crypto_aligned = crypto_returns.loc[common_dates]
+            period_label = f"{len(common_dates)} gün"
         
         correlation = np.corrcoef(dxy_aligned, crypto_aligned)[0, 1]
         
@@ -299,7 +316,7 @@ def fetch_correlation_data(crypto_symbol: str = "BTC-USD", days: int = 30):
             'correlation': correlation,
             'dxy_data': dxy_hist,
             'crypto_data': crypto_hist,
-            'days': len(common_dates)
+            'days': period_label
         }, None
     except Exception as e:
         return None, str(e)
@@ -884,7 +901,7 @@ def render_macro_page():
     asset_symbol = crypto_options[selected_asset]
     
     with st.spinner("Korelasyon hesaplanıyor..."):
-        corr_data, corr_error = fetch_correlation_data(asset_symbol, 30)
+        corr_data, corr_error = fetch_correlation_data(asset_symbol, 60)
     
     if corr_data:
         col1, col2 = st.columns([1, 3])
