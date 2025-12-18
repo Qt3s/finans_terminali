@@ -1679,6 +1679,100 @@ def render_dashboard():
     """Ana Dashboard - Piyasa Özeti"""
     st.title("🏠 Piyasa Özeti")
     st.caption(f"Son güncelleme: {datetime.now().strftime('%H:%M:%S')}")
+    
+    # ==================== AKSİYON MERKEZİ ====================
+    with st.container():
+        # AI ve Makro verilerini kontrol et
+        ai_prob = None
+        risk_score = st.session_state.get('risk_score', 50)
+        market_regime = st.session_state.get('market_regime', 'KARIŞIK')
+        
+        if 'xgb_model' in st.session_state and st.session_state.xgb_model is not None:
+            try:
+                last_row = st.session_state.xgb_last_row
+                proba = st.session_state.xgb_model.predict_proba(last_row)[0]
+                ai_prob = proba[1] * 100
+            except:
+                ai_prob = None
+        
+        # Karar mantığı
+        if ai_prob is not None and ai_prob > 55 and risk_score > 60:
+            # YEŞİL: Olumlu koşullar
+            st.markdown("""
+            <div style="background: linear-gradient(135deg, #00C85322, #00C85344); border: 3px solid #00C853; border-radius: 15px; padding: 25px; margin-bottom: 20px;">
+                <h2 style="color: #00C853; margin: 0; text-align: center;">✅ YATIRIM İÇİN UYGUN KOŞULLAR</h2>
+                <p style="color: #888; text-align: center; margin: 10px 0;">AI tahmini olumlu, makro riskler düşük. Pozisyon açmak için uygun ortam.</p>
+            </div>
+            """, unsafe_allow_html=True)
+        elif ai_prob is not None and ai_prob < 45 or risk_score < 40:
+            # KIRMIZI: Riskli koşullar
+            st.markdown("""
+            <div style="background: linear-gradient(135deg, #FF174422, #FF174444); border: 3px solid #FF1744; border-radius: 15px; padding: 25px; margin-bottom: 20px;">
+                <h2 style="color: #FF1744; margin: 0; text-align: center;">⚠️ RİSK YÜKSEK - KORUNMA MODU</h2>
+                <p style="color: #888; text-align: center; margin: 10px 0;">AI tahmini olumsuz veya makro riskler yüksek. Nakit/altın pozisyonu düşünün.</p>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            # SARI: Nötr/Karışık
+            st.markdown("""
+            <div style="background: linear-gradient(135deg, #FF980022, #FF980044); border: 3px solid #FF9800; border-radius: 15px; padding: 25px; margin-bottom: 20px;">
+                <h2 style="color: #FF9800; margin: 0; text-align: center;">🔄 KARIŞIK SİNYALLER - DİKKATLİ OLUN</h2>
+                <p style="color: #888; text-align: center; margin: 10px 0;">Piyasa yön arıyor. Küçük pozisyonlar, stop-loss kullanın.</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Hızlı göstergeler
+        quick_cols = st.columns(4)
+        
+        with quick_cols[0]:
+            if ai_prob is not None:
+                ai_color = "#00C853" if ai_prob > 55 else "#FF1744" if ai_prob < 45 else "#FF9800"
+                st.markdown(f"""
+                <div style="text-align: center; padding: 15px; background: {ai_color}22; border-radius: 10px;">
+                    <p style="margin: 0; color: #888; font-size: 0.8rem;">🤖 AI Tahmini</p>
+                    <h2 style="color: {ai_color}; margin: 5px 0;">{ai_prob:.0f}%</h2>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.info("🤖 AI: Model eğitilmedi")
+        
+        with quick_cols[1]:
+            risk_color = "#00C853" if risk_score > 60 else "#FF1744" if risk_score < 40 else "#FF9800"
+            st.markdown(f"""
+            <div style="text-align: center; padding: 15px; background: {risk_color}22; border-radius: 10px;">
+                <p style="margin: 0; color: #888; font-size: 0.8rem;">🧭 Risk Skoru</p>
+                <h2 style="color: {risk_color}; margin: 5px 0;">{risk_score:.0f}</h2>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with quick_cols[2]:
+            regime_color = "#00C853" if "GOLD" in market_regime else "#FF1744" if "RESES" in market_regime else "#FF9800"
+            st.markdown(f"""
+            <div style="text-align: center; padding: 15px; background: {regime_color}22; border-radius: 10px;">
+                <p style="margin: 0; color: #888; font-size: 0.8rem;">🌍 Piyasa Rejimi</p>
+                <p style="color: {regime_color}; margin: 5px 0; font-size: 0.9rem; font-weight: bold;">{market_regime[:15]}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with quick_cols[3]:
+            # SHAP en önemli 3 faktör
+            if 'xgb_importance' in st.session_state:
+                top3 = st.session_state.xgb_importance.head(3)['feature'].tolist()
+                factors_text = "<br>".join([f"• {f[:15]}" for f in top3])
+                st.markdown(f"""
+                <div style="text-align: center; padding: 15px; background: #2196F322; border-radius: 10px;">
+                    <p style="margin: 0; color: #888; font-size: 0.8rem;">📊 En Önemli Faktörler</p>
+                    <p style="color: #2196F3; margin: 5px 0; font-size: 0.7rem;">{factors_text}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div style="text-align: center; padding: 15px; background: #9E9E9E22; border-radius: 10px;">
+                    <p style="margin: 0; color: #888; font-size: 0.8rem;">📊 En Önemli Faktörler</p>
+                    <p style="color: #9E9E9E; margin: 5px 0; font-size: 0.8rem;">Model eğitilmedi</p>
+                </div>
+                """, unsafe_allow_html=True)
+    
     st.divider()
     
     # Kripto Özet
@@ -1778,6 +1872,20 @@ def render_dashboard():
             st.metric("📜 ABD 10Y", f"%{bond_val:.2f}", f"{bond_change:+.2f}%")
         else:
             st.metric("📜 ABD 10Y", "—")
+    
+    # İnsan dostu makro özet
+    with st.expander("💡 Bu Veriler Ne Anlama Geliyor?"):
+        st.markdown("""
+        | Gösterge | Basit Adı | Yukarı ⬆️ | Aşağı ⬇️ |
+        |----------|-----------|-----------|----------|
+        | **DXY** | 💵 Doların Gücü | Kripto için kötü | Kripto için iyi |
+        | **VIX** | 😱 Korku Endeksi | Piyasa panik modda | Piyasa sakin |
+        | **US10Y** | 💳 Borçlanma Maliyeti | Likidite azalıyor | Likidite artıyor |
+        | **Gold** | 🥇 Güvenli Liman | Yatırımcılar korkuyor | Yatırımcılar risk alıyor |
+        | **JPY** | 🇯🇵 Japonya Etkisi | Yen zayıf, carry trade | Yen güçlü, risk-off |
+        
+        **Özet**: Düşük DXY + Düşük VIX + Düşük faiz = **Risk-on ortam (kripto için iyi)**
+        """)
 
 
 def render_crypto_page():
@@ -3085,81 +3193,95 @@ def render_ai_page():
                 color = "#FF9800"
                 signal = "➡️ NÖTR"
             
-            st.markdown(f"""
-            <div style="text-align: center; padding: 30px; background: linear-gradient(135deg, {color}22, {color}44); border-radius: 20px; border: 4px solid {color};">
-                <h1 style="color: {color}; margin: 0; font-size: 4rem;">{bull_prob:.0f}%</h1>
-                <h2 style="color: {color}; margin: 10px 0;">{signal}</h2>
-                <p style="color: #888; margin: 0;">5 Periyot Sonrası</p>
-            </div>
-            """, unsafe_allow_html=True)
+            # Gauge Chart (Plotly)
+            fig_gauge = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=bull_prob,
+                domain={'x': [0, 1], 'y': [0, 1]},
+                title={'text': "Yükseliş Olasılığı", 'font': {'size': 16, 'color': '#888'}},
+                number={'suffix': "%", 'font': {'size': 40, 'color': color}},
+                gauge={
+                    'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "#555"},
+                    'bar': {'color': color},
+                    'bgcolor': "#1e1e1e",
+                    'borderwidth': 2,
+                    'bordercolor': "#333",
+                    'steps': [
+                        {'range': [0, 40], 'color': '#FF174422'},
+                        {'range': [40, 60], 'color': '#FF980022'},
+                        {'range': [60, 100], 'color': '#00C85322'}
+                    ],
+                    'threshold': {
+                        'line': {'color': "white", 'width': 4},
+                        'thickness': 0.75,
+                        'value': bull_prob
+                    }
+                }
+            ))
             
+            fig_gauge.update_layout(
+                template="plotly_dark",
+                height=250,
+                margin=dict(l=20, r=20, t=50, b=20)
+            )
+            
+            st.plotly_chart(fig_gauge, use_container_width=True)
+            st.markdown(f"<h3 style='text-align:center; color:{color};'>{signal}</h3>", unsafe_allow_html=True)
             st.caption(f"Model Accuracy: {st.session_state.xgb_accuracy:.1%}")
         
         with col2:
-            # SHAP Açıklanabilirlik
-            st.write("**📊 SHAP Feature Importance**")
+            # Basitleştirilmiş SHAP - İnsan okunabilir
+            st.write("**🎯 Tahmini Etkileyen En Önemli 3 Faktör**")
             
-            try:
-                import shap
+            # Feature isimlerini insan dostu hale getir
+            feature_labels = {
+                'returns': '📈 Fiyat Değişimi',
+                'RSI_14': '📊 RSI (Aşırı alım/satım)',
+                'RSI_normalized': '📊 RSI Durumu',
+                'volatility_20': '🌊 Volatilite',
+                'volatility_10': '🌊 Kısa Vadeli Volatilite',
+                'ROC_5': '🚀 Kısa Momentum',
+                'ROC_10': '🚀 Orta Momentum',
+                'ROC_20': '🚀 Uzun Momentum',
+                'ATR_pct': '📏 ATR (Volatilite)',
+                'ema_20_diff': '📉 EMA-20 Uzaklığı',
+                'ema_50_diff': '📉 EMA-50 Uzaklığı',
+                'vwap_diff': '💰 VWAP Farkı',
+                'volume_pct': '📊 Hacim Değişimi',
+                'ema_signal_20_50': '🚦 EMA Kesişimi',
+                'macro_dxy': '💵 Doların Gücü',
+                'macro_vix': '😱 Korku Endeksi',
+                'log_returns': '📈 Log Getiri'
+            }
+            
+            if 'xgb_importance' in st.session_state:
+                top3 = st.session_state.xgb_importance.head(3)
                 
-                # SHAP değerleri hesapla
-                explainer = shap.TreeExplainer(model)
-                shap_values = explainer.shap_values(last_row)
-                
-                # En önemli 10 feature
-                feature_importance = pd.DataFrame({
-                    'feature': st.session_state.xgb_features,
-                    'importance': np.abs(shap_values[0])
-                }).sort_values('importance', ascending=False).head(10)
-                
-                # Plotly bar chart
-                fig = go.Figure()
-                fig.add_trace(go.Bar(
-                    x=feature_importance['importance'],
-                    y=feature_importance['feature'],
-                    orientation='h',
-                    marker=dict(color='#2196F3')
-                ))
-                
-                fig.update_layout(
-                    template="plotly_dark",
-                    height=300,
-                    margin=dict(l=0, r=0, t=20, b=20),
-                    xaxis_title="SHAP Importance",
-                    yaxis=dict(autorange="reversed")
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-            except ImportError:
-                st.warning("SHAP kütüphanesi yüklü değil. Feature importance gösterilemiyor.")
-                
-                # Fallback: XGBoost built-in importance
-                importance = model.feature_importances_
-                top_features = pd.DataFrame({
-                    'feature': st.session_state.xgb_features,
-                    'importance': importance
-                }).sort_values('importance', ascending=False).head(10)
-                
-                fig = go.Figure()
-                fig.add_trace(go.Bar(
-                    x=top_features['importance'],
-                    y=top_features['feature'],
-                    orientation='h',
-                    marker=dict(color='#FF9800')
-                ))
-                
-                fig.update_layout(
-                    template="plotly_dark",
-                    height=300,
-                    margin=dict(l=0, r=0, t=20, b=20),
-                    xaxis_title="Feature Importance (XGBoost)",
-                    yaxis=dict(autorange="reversed")
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-            except Exception as e:
-                st.warning(f"SHAP hesaplama hatası: {str(e)}")
+                for i, row in top3.iterrows():
+                    feat_name = row['feature']
+                    human_name = feature_labels.get(feat_name, feat_name)
+                    importance = row['importance']
+                    
+                    # Renk belirle
+                    if i == 0:
+                        rank_color = "#FFD700"  # Altın
+                        rank_icon = "🥇"
+                    elif i == 1:
+                        rank_color = "#C0C0C0"  # Gümüş
+                        rank_icon = "🥈"
+                    else:
+                        rank_color = "#CD7F32"  # Bronz
+                        rank_icon = "🥉"
+                    
+                    st.markdown(f"""
+                    <div style="padding: 12px; background: #2a2a2a; border-radius: 10px; margin-bottom: 10px; border-left: 4px solid {rank_color};">
+                        <span style="font-size: 1.2rem;">{rank_icon}</span>
+                        <span style="color: #fff; font-weight: bold;"> {human_name}</span>
+                        <span style="color: #888; float: right;">({importance:.3f})</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.info("Feature importance hesaplanmadı")
         
         st.divider()
         
