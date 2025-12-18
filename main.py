@@ -227,6 +227,106 @@ def fetch_ethereum_data():
         return None, str(e)
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_macro_data():
+    """Makro ekonomi verileri: DXY, Bonds, Gold, VIX."""
+    import yfinance as yf
+    
+    symbols = {
+        'DXY': 'DX-Y.NYB',
+        'US10Y': '^TNX',
+        'Gold': 'GC=F',
+        'VIX': '^VIX'
+    }
+    
+    results = {}
+    
+    for name, symbol in symbols.items():
+        try:
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period='5d')
+            
+            if not hist.empty:
+                last = hist['Close'].iloc[-1]
+                prev = hist['Close'].iloc[-2] if len(hist) > 1 else last
+                change = ((last - prev) / prev) * 100 if prev != 0 else 0
+                
+                results[name] = {
+                    'value': last,
+                    'change': change,
+                    'history': hist
+                }
+            else:
+                results[name] = None
+        except Exception as e:
+            results[name] = None
+    
+    return results
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_correlation_data(crypto_symbol: str = "BTC-USD", days: int = 30):
+    """DXY ve Kripto arasındaki korelasyonu hesaplar."""
+    import yfinance as yf
+    import numpy as np
+    
+    try:
+        dxy = yf.Ticker('DX-Y.NYB')
+        crypto = yf.Ticker(crypto_symbol)
+        
+        dxy_hist = dxy.history(period=f'{days}d')
+        crypto_hist = crypto.history(period=f'{days}d')
+        
+        if dxy_hist.empty or crypto_hist.empty:
+            return None, "Veri yetersiz"
+        
+        # Tarihleri hizala
+        dxy_returns = dxy_hist['Close'].pct_change().dropna()
+        crypto_returns = crypto_hist['Close'].pct_change().dropna()
+        
+        # Ortak tarihleri bul
+        common_dates = dxy_returns.index.intersection(crypto_returns.index)
+        
+        if len(common_dates) < 10:
+            return None, "Yeterli ortak veri yok"
+        
+        dxy_aligned = dxy_returns.loc[common_dates]
+        crypto_aligned = crypto_returns.loc[common_dates]
+        
+        correlation = np.corrcoef(dxy_aligned, crypto_aligned)[0, 1]
+        
+        return {
+            'correlation': correlation,
+            'dxy_data': dxy_hist,
+            'crypto_data': crypto_hist,
+            'days': len(common_dates)
+        }, None
+    except Exception as e:
+        return None, str(e)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_protocol_revenue(protocol_slug: str):
+    """DeFiLlama'dan protokol gelir verisini çeker."""
+    try:
+        url = f"https://api.llama.fi/summary/fees/{protocol_slug}?dataType=dailyRevenue"
+        response = requests.get(url, timeout=15)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Son 30 günlük toplam gelir
+            total_30d = data.get('total30d', 0)
+            total_24h = data.get('total24h', 0)
+            return {
+                'revenue_30d': total_30d,
+                'revenue_24h': total_24h
+            }, None
+        else:
+            return None, "Gelir verisi yok"
+    except Exception as e:
+        return None, str(e)
+
+
 # ==================== BUFFETT SKOR HESAPLAMA ====================
 
 def calculate_buffett_score(mcap: float, tvl: float, treasury_data: dict = None):
@@ -569,6 +669,53 @@ def render_onchain_page():
             color = "🟢" if mcap_tvl < 1 else "🟡" if mcap_tvl < 3 else "🔴"
             st.metric(f"{color} Mcap/TVL Oranı", f"{mcap_tvl:.2f}x" if mcap_tvl > 0 else "—")
         
+        # P/S Oranı (Yeni Satır)
+        st.divider()
+        st.subheader("💰 Gelir Analizi (Price-to-Sales)")
+        
+        revenue_data, revenue_err = fetch_protocol_revenue(protocol_slug)
+        
+        cols2 = st.columns(3)
+        
+        with cols2[0]:
+            if revenue_data and revenue_data.get('revenue_30d'):
+                try:
+                    rev_30d = float(revenue_data['revenue_30d'])
+                    st.metric("📈 30 Günlük Gelir", f"${rev_30d/1e6:.2f}M")
+                except:
+                    st.metric("📈 30 Günlük Gelir", "—")
+            else:
+                st.metric("📈 30 Günlük Gelir", "—")
+        
+        with cols2[1]:
+            if revenue_data and revenue_data.get('revenue_24h'):
+                try:
+                    rev_24h = float(revenue_data['revenue_24h'])
+                    st.metric("📊 24s Gelir", f"${rev_24h/1e3:.1f}K")
+                except:
+                    st.metric("📊 24s Gelir", "—")
+            else:
+                st.metric("📊 24s Gelir", "—")
+        
+        with cols2[2]:
+            # P/S = Mcap / (Monthly Revenue * 12)
+            if revenue_data and revenue_data.get('revenue_30d') and mcap > 0:
+                try:
+                    rev_30d = float(revenue_data['revenue_30d'])
+                    if rev_30d > 0:
+                        annualized_revenue = rev_30d * 12
+                        ps_ratio = mcap / annualized_revenue
+                        ps_color = "🟢" if ps_ratio < 20 else "🟡" if ps_ratio < 50 else "🔴"
+                        st.metric(f"{ps_color} P/S Oranı", f"{ps_ratio:.1f}x")
+                    else:
+                        st.metric("📉 P/S Oranı", "—")
+                except:
+                    st.metric("📉 P/S Oranı", "—")
+            else:
+                st.metric("📉 P/S Oranı", "—")
+        
+        st.caption("💡 P/S = Market Cap / (Aylık Gelir × 12). Düşük P/S = Potansiyel ucuz.")
+        
         st.divider()
         
         # Buffett Skoru
@@ -660,6 +807,183 @@ def render_onchain_page():
         st.info("💡 DeFiLlama API'sine bağlanırken sorun oluştu. Lütfen tekrar deneyin.")
 
 
+def render_macro_page():
+    """Makro Ekonomi Sayfası - Piyasa Pusulası"""
+    st.title("📊 Makro Ekonomi")
+    st.caption("Küresel piyasa göstergeleri ve korelasyon analizi")
+    st.divider()
+    
+    # Makro verileri çek
+    with st.spinner("Makro veriler yükleniyor..."):
+        macro_data = fetch_macro_data()
+    
+    # Metrikler
+    st.subheader("🌍 Küresel Göstergeler")
+    cols = st.columns(4)
+    
+    # DXY
+    with cols[0]:
+        if macro_data.get('DXY'):
+            dxy = macro_data['DXY']
+            st.metric(
+                "💵 DXY (Dolar)",
+                f"{dxy['value']:.2f}",
+                f"{dxy['change']:+.2f}%"
+            )
+        else:
+            st.metric("💵 DXY", "—")
+    
+    # US 10Y
+    with cols[1]:
+        if macro_data.get('US10Y'):
+            bonds = macro_data['US10Y']
+            st.metric(
+                "📜 ABD 10Y Tahvil",
+                f"%{bonds['value']:.2f}",
+                f"{bonds['change']:+.2f}%"
+            )
+        else:
+            st.metric("📜 ABD 10Y", "—")
+    
+    # Gold
+    with cols[2]:
+        if macro_data.get('Gold'):
+            gold = macro_data['Gold']
+            st.metric(
+                "🥇 Altın",
+                f"${gold['value']:,.0f}",
+                f"{gold['change']:+.2f}%"
+            )
+        else:
+            st.metric("🥇 Altın", "—")
+    
+    # VIX
+    with cols[3]:
+        if macro_data.get('VIX'):
+            vix = macro_data['VIX']
+            vix_status = "🟢" if vix['value'] < 20 else "🟡" if vix['value'] < 30 else "🔴"
+            st.metric(
+                f"😱 VIX {vix_status}",
+                f"{vix['value']:.1f}",
+                f"{vix['change']:+.2f}%"
+            )
+        else:
+            st.metric("😱 VIX", "—")
+    
+    st.divider()
+    
+    # Korelasyon Analizi
+    st.subheader("📈 DXY - Bitcoin Korelasyonu")
+    
+    col1, col2 = st.columns([3, 5])
+    
+    with col1:
+        crypto_options = {"Bitcoin": "BTC-USD", "Ethereum": "ETH-USD", "Gold": "GC=F"}
+        selected_asset = st.selectbox("Karşılaştır", list(crypto_options.keys()))
+    
+    asset_symbol = crypto_options[selected_asset]
+    
+    with st.spinner("Korelasyon hesaplanıyor..."):
+        corr_data, corr_error = fetch_correlation_data(asset_symbol, 30)
+    
+    if corr_data:
+        col1, col2 = st.columns([1, 3])
+        
+        with col1:
+            corr_value = corr_data['correlation']
+            
+            if corr_value < -0.3:
+                corr_color = "#00C853"
+                corr_text = "Negatif (BTC için olumlu)"
+            elif corr_value > 0.3:
+                corr_color = "#FF1744"
+                corr_text = "Pozitif (BTC için olumsuz)"
+            else:
+                corr_color = "#FF9800"
+                corr_text = "Nötr"
+            
+            st.markdown(f"""
+            <div style="text-align: center; padding: 15px; background: linear-gradient(135deg, {corr_color}22, {corr_color}44); border-radius: 10px; border: 2px solid {corr_color};">
+                <h2 style="color: {corr_color}; margin: 0;">{corr_value:.2f}</h2>
+                <p style="color: {corr_color}; margin: 0; font-size: 0.9rem;">{corr_text}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.caption(f"Son {corr_data['days']} gün verisi")
+        
+        with col2:
+            # Dual axis chart
+            fig = go.Figure()
+            
+            dxy_hist = corr_data['dxy_data']
+            crypto_hist = corr_data['crypto_data']
+            
+            fig.add_trace(go.Scatter(
+                x=dxy_hist.index,
+                y=dxy_hist['Close'],
+                name='DXY',
+                line=dict(color='#2196F3', width=2),
+                yaxis='y'
+            ))
+            
+            fig.add_trace(go.Scatter(
+                x=crypto_hist.index,
+                y=crypto_hist['Close'],
+                name=selected_asset,
+                line=dict(color='#FF9800', width=2),
+                yaxis='y2'
+            ))
+            
+            fig.update_layout(
+                template="plotly_dark",
+                height=300,
+                margin=dict(l=0, r=0, t=20, b=20),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                yaxis=dict(title="DXY", side="left"),
+                yaxis2=dict(title=selected_asset, side="right", overlaying="y")
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning(f"Korelasyon verisi alınamadı: {corr_error}")
+    
+    st.divider()
+    
+    # Piyasa Yorumu
+    st.subheader("💡 Piyasa Pusulası")
+    
+    insights = []
+    
+    if macro_data.get('DXY'):
+        dxy_val = macro_data['DXY']['value']
+        if dxy_val > 105:
+            insights.append("🔴 **Güçlü Dolar**: Risk iştahı düşük, kripto için baskı.")
+        elif dxy_val < 100:
+            insights.append("🟢 **Zayıf Dolar**: Risk iştahı yüksek, kripto için olumlu.")
+        else:
+            insights.append("🟡 **Nötr Dolar**: Piyasa yön arıyor.")
+    
+    if macro_data.get('VIX'):
+        vix_val = macro_data['VIX']['value']
+        if vix_val > 30:
+            insights.append("🔴 **Yüksek Korku**: Volatilite yüksek, dikkatli olun.")
+        elif vix_val < 15:
+            insights.append("🟢 **Düşük Korku**: Piyasa sakin, risk alınabilir.")
+    
+    if macro_data.get('US10Y'):
+        bond_val = macro_data['US10Y']['value']
+        if bond_val > 4.5:
+            insights.append("🔴 **Yüksek Faiz**: Hisse ve kripto için baskı.")
+        elif bond_val < 3.5:
+            insights.append("🟢 **Düşük Faiz**: Risk varlıkları için olumlu.")
+    
+    if insights:
+        for insight in insights:
+            st.write(insight)
+    else:
+        st.info("Piyasa verileri yüklenemedi.")
+
+
 def render_settings_page():
     """Ayarlar Sayfası"""
     st.title("⚙️ Ayarlar")
@@ -705,6 +1029,7 @@ def render_sidebar():
         '🪙 Kripto Analiz',
         '📈 Hisse Senedi',
         '🔍 On-Chain Bilanço',
+        '📊 Makro Ekonomi',
         '⚙️ Ayarlar'
     ]
     
@@ -731,6 +1056,8 @@ def main():
         render_stock_page()
     elif selected_page == '🔍 On-Chain Bilanço':
         render_onchain_page()
+    elif selected_page == '📊 Makro Ekonomi':
+        render_macro_page()
     elif selected_page == '⚙️ Ayarlar':
         render_settings_page()
     
