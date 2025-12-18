@@ -1,17 +1,14 @@
-# Finans Terminali - Buffett Edition
+# Finans Terminali - Buffett Edition v3.2
 # Python 3.10+ gerektirir
-
 # Core
 streamlit>=1.29.0
 pandas>=2.0.0
+numpy>=1.24.0
 plotly>=5.18.0
 requests>=2.31.0
-
 # Kripto Data
 ccxt>=4.0.0
-
-# Hisse Senedi Data
+# Hisse & Makro Data
 yfinance>=0.2.33
-
 # Blockchain / On-Chain
 web3>=6.11.0
