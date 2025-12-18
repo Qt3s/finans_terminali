@@ -692,6 +692,244 @@ def prepare_master_features(macro_data, liquidity_data, yield_data, credit_data,
     return features
 
 
+@st.cache_data(ttl=43200, show_spinner=False)  # 12 saat cache
+def fetch_geopolitical_trade_data():
+    """
+    Jeopolitik ve Ticaret Verileri.
+    
+    FRED API olmadan proxy'ler:
+    - GPR Proxy: VIX volatilite + Altın volatilite kombinasyonu
+    - BDI Proxy: BDRY ETF (Breakwave Dry Bulk Shipping)
+    - Bank Stress: KBE (Bank ETF) / TLT oranı
+    """
+    import yfinance as yf
+    import numpy as np
+    
+    try:
+        results = {}
+        
+        # ===== GPR (Jeopolitik Risk) Proxy =====
+        # VIX yüksek + Altın yükseliyor = Jeopolitik stres
+        vix = yf.Ticker('^VIX')
+        gold = yf.Ticker('GC=F')
+        
+        vix_hist = vix.history(period='3mo')
+        gold_hist = gold.history(period='3mo')
+        
+        if not vix_hist.empty and not gold_hist.empty:
+            vix_vol = float(vix_hist['Close'].std())
+            vix_current = float(vix_hist['Close'].iloc[-1])
+            vix_avg = float(vix_hist['Close'].mean())
+            
+            gold_ret = gold_hist['Close'].pct_change().dropna()
+            gold_vol = float(gold_ret.std() * 100)
+            
+            # GPR Skoru: VIX seviyesi + Altın volatilitesi
+            gpr_score = (vix_current / 20) * 50 + gold_vol * 10  # 0-100 arası normalize
+            gpr_score = min(100, max(0, gpr_score))
+            
+            if gpr_score > 70:
+                gpr_level = "YÜKSEK"
+                gpr_risk_score = -15
+            elif gpr_score > 50:
+                gpr_level = "ORTA"
+                gpr_risk_score = -5
+            else:
+                gpr_level = "DÜŞÜK"
+                gpr_risk_score = 5
+            
+            results['gpr'] = {
+                'score': gpr_score,
+                'level': gpr_level,
+                'risk_score': gpr_risk_score,
+                'vix_current': vix_current,
+                'vix_avg': vix_avg
+            }
+        
+        # ===== Baltic Dry Index Proxy =====
+        # BDRY ETF veya alternatif olarak nakliye şirketleri
+        try:
+            bdry = yf.Ticker('BDRY')  # Baltic Dry ETF
+            bdry_hist = bdry.history(period='6mo')
+            
+            if not bdry_hist.empty:
+                bdry_last = float(bdry_hist['Close'].iloc[-1])
+                bdry_prev = float(bdry_hist['Close'].iloc[-30]) if len(bdry_hist) >= 30 else bdry_last
+                bdry_change = ((bdry_last - bdry_prev) / bdry_prev) * 100
+                
+                if bdry_change > 10:
+                    trade_outlook = "CANLI"
+                    trade_score = 10
+                elif bdry_change < -10:
+                    trade_outlook = "DURGUN"
+                    trade_score = -10
+                else:
+                    trade_outlook = "NORMAL"
+                    trade_score = 0
+                
+                results['trade'] = {
+                    'bdi_value': bdry_last,
+                    'change_30d': bdry_change,
+                    'outlook': trade_outlook,
+                    'score': trade_score
+                }
+        except:
+            pass
+        
+        # ===== Bank Stress Proxy =====
+        # KBE (Bank ETF) / TLT (Treasury ETF) oranı
+        try:
+            kbe = yf.Ticker('KBE')  # SPDR S&P Bank ETF
+            tlt = yf.Ticker('TLT')  # Long Treasury ETF
+            
+            kbe_hist = kbe.history(period='3mo')
+            tlt_hist = tlt.history(period='3mo')
+            
+            if not kbe_hist.empty and not tlt_hist.empty:
+                kbe_last = float(kbe_hist['Close'].iloc[-1])
+                tlt_last = float(tlt_hist['Close'].iloc[-1])
+                bank_ratio = kbe_last / tlt_last
+                
+                kbe_prev = float(kbe_hist['Close'].iloc[-30]) if len(kbe_hist) >= 30 else kbe_last
+                tlt_prev = float(tlt_hist['Close'].iloc[-30]) if len(tlt_hist) >= 30 else tlt_last
+                prev_ratio = kbe_prev / tlt_prev
+                
+                ratio_change = ((bank_ratio - prev_ratio) / prev_ratio) * 100
+                
+                # Oran düşüyorsa = bankalar tahvillere göre zayıflıyor = stres
+                if ratio_change < -5:
+                    bank_stress = "YÜKSEK"
+                    bank_score = -20
+                elif ratio_change > 5:
+                    bank_stress = "DÜŞÜK"
+                    bank_score = 10
+                else:
+                    bank_stress = "NORMAL"
+                    bank_score = 0
+                
+                results['bank'] = {
+                    'kbe_tlt_ratio': bank_ratio,
+                    'change_30d': ratio_change,
+                    'stress_level': bank_stress,
+                    'score': bank_score
+                }
+        except:
+            pass
+        
+        # ===== Varlık Rotasyonu Rasyoları =====
+        try:
+            nasdaq = yf.Ticker('^IXIC')
+            btc = yf.Ticker('BTC-USD')
+            dxy = yf.Ticker('DX-Y.NYB')
+            
+            nasdaq_hist = nasdaq.history(period='3mo')
+            btc_hist = btc.history(period='3mo')
+            dxy_hist = dxy.history(period='3mo')
+            
+            ratios = {}
+            
+            # Nasdaq/Gold Oranı
+            if not nasdaq_hist.empty and not gold_hist.empty:
+                nasdaq_last = float(nasdaq_hist['Close'].iloc[-1])
+                gold_last = float(gold_hist['Close'].iloc[-1])
+                nq_gold = nasdaq_last / gold_last
+                
+                nasdaq_prev = float(nasdaq_hist['Close'].iloc[-30]) if len(nasdaq_hist) >= 30 else nasdaq_last
+                gold_prev = float(gold_hist['Close'].iloc[-30]) if len(gold_hist) >= 30 else gold_last
+                nq_gold_prev = nasdaq_prev / gold_prev
+                
+                nq_gold_change = ((nq_gold - nq_gold_prev) / nq_gold_prev) * 100
+                
+                if nq_gold_change > 5:
+                    rotation = "RISK-ON"
+                elif nq_gold_change < -5:
+                    rotation = "RISK-OFF"
+                else:
+                    rotation = "NÖTR"
+                
+                ratios['nasdaq_gold'] = {
+                    'ratio': nq_gold,
+                    'change_30d': nq_gold_change,
+                    'rotation': rotation
+                }
+            
+            # BTC/DXY Oranı
+            if not btc_hist.empty and not dxy_hist.empty:
+                btc_last = float(btc_hist['Close'].iloc[-1])
+                dxy_last = float(dxy_hist['Close'].iloc[-1])
+                btc_dxy = btc_last / dxy_last
+                
+                btc_prev = float(btc_hist['Close'].iloc[-30]) if len(btc_hist) >= 30 else btc_last
+                dxy_prev = float(dxy_hist['Close'].iloc[-30]) if len(dxy_hist) >= 30 else dxy_last
+                btc_dxy_prev = btc_prev / dxy_prev
+                
+                btc_dxy_change = ((btc_dxy - btc_dxy_prev) / btc_dxy_prev) * 100
+                
+                ratios['btc_dxy'] = {
+                    'ratio': btc_dxy,
+                    'change_30d': btc_dxy_change
+                }
+            
+            results['ratios'] = ratios
+        except:
+            pass
+        
+        return results, None
+    except Exception as e:
+        return None, str(e)
+
+
+def prepare_master_features_final(base_features: dict, geo_data: dict = None) -> dict:
+    """
+    XGBoost için final feature matrix.
+    Tüm verileri birleştirir ve NaN temizliği yapar.
+    """
+    import numpy as np
+    
+    features = base_features.copy() if base_features else {}
+    
+    # Jeopolitik ve ticaret verileri
+    if geo_data:
+        if geo_data.get('gpr'):
+            features['gpr_score'] = geo_data['gpr']['score']
+            features['gpr_risk_score'] = geo_data['gpr']['risk_score']
+        
+        if geo_data.get('trade'):
+            features['bdi_change'] = geo_data['trade']['change_30d']
+            features['trade_score'] = geo_data['trade']['score']
+        
+        if geo_data.get('bank'):
+            features['bank_stress_score'] = geo_data['bank']['score']
+            features['kbe_tlt_change'] = geo_data['bank']['change_30d']
+        
+        if geo_data.get('ratios'):
+            if geo_data['ratios'].get('nasdaq_gold'):
+                features['nasdaq_gold_change'] = geo_data['ratios']['nasdaq_gold']['change_30d']
+            if geo_data['ratios'].get('btc_dxy'):
+                features['btc_dxy_change'] = geo_data['ratios']['btc_dxy']['change_30d']
+    
+    # NaN temizliği ve tip dönüşümü
+    cleaned = {}
+    for key, value in features.items():
+        if value is None:
+            cleaned[key] = 0.0
+        elif isinstance(value, (int, float)):
+            if np.isnan(value) or np.isinf(value):
+                cleaned[key] = 0.0
+            else:
+                cleaned[key] = float(value)
+        else:
+            try:
+                cleaned[key] = float(value)
+            except:
+                cleaned[key] = 0.0
+    
+    # Session state'e kaydet
+    st.session_state['master_features_final'] = cleaned
+    
+    return cleaned
+
+
 @st.cache_data(ttl=21600, show_spinner=False)  # 6 saat cache
 def fetch_fear_greed_index():
     """
@@ -1837,9 +2075,11 @@ def render_macro_page():
         sentiment_data, sent_err = fetch_market_sentiment()
         credit_data, credit_err = fetch_credit_and_liquidity_data()
         correlation_data, corr_err = fetch_rolling_correlations(30)
+        geo_data, geo_err = fetch_geopolitical_trade_data()
     
     # Master features hazırla (XGBoost için)
-    master_features = prepare_master_features(macro_data, liquidity_data, yield_data, credit_data, fng_data, correlation_data)
+    base_features = prepare_master_features(macro_data, liquidity_data, yield_data, credit_data, fng_data, correlation_data)
+    master_features = prepare_master_features_final(base_features, geo_data)
     
     # ==================== PİYASA REJİMİ ====================
     st.subheader("🎯 Piyasa Rejimi Analizi")
@@ -2351,11 +2591,84 @@ def render_macro_page():
     
     st.divider()
     
+    # ==================== JEOPOLİTİK VE TİCARET ====================
+    st.subheader("🌐 Jeopolitik Risk ve Küresel Ticaret")
+    
+    if geo_data:
+        geo_cols = st.columns(4)
+        
+        # GPR (Jeopolitik Risk)
+        with geo_cols[0]:
+            if geo_data.get('gpr'):
+                gpr = geo_data['gpr']
+                gpr_color = "#FF1744" if gpr['level'] == "YÜKSEK" else "#00C853" if gpr['level'] == "DÜŞÜK" else "#FF9800"
+                st.markdown(f"""
+                <div style="text-align: center; padding: 15px; background: {gpr_color}22; border-radius: 10px; border: 2px solid {gpr_color};">
+                    <p style="margin: 0; color: #888;">🎯 Jeopolitik Risk</p>
+                    <h2 style="color: {gpr_color}; margin: 5px 0;">{gpr['score']:.0f}</h2>
+                    <p style="color: {gpr_color}; margin: 0;">{gpr['level']}</p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Baltic Dry Index
+        with geo_cols[1]:
+            if geo_data.get('trade'):
+                bdi = geo_data['trade']
+                bdi_color = "#00C853" if bdi['outlook'] == "CANLI" else "#FF1744" if bdi['outlook'] == "DURGUN" else "#FF9800"
+                st.markdown(f"""
+                <div style="text-align: center; padding: 15px; background: {bdi_color}22; border-radius: 10px; border: 2px solid {bdi_color};">
+                    <p style="margin: 0; color: #888;">🚢 Küresel Ticaret</p>
+                    <h3 style="color: {bdi_color}; margin: 5px 0;">{bdi['outlook']}</h3>
+                    <p style="color: {bdi_color}; margin: 0;">{bdi['change_30d']:+.1f}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Bank Stress
+        with geo_cols[2]:
+            if geo_data.get('bank'):
+                bank = geo_data['bank']
+                bank_color = "#FF1744" if bank['stress_level'] == "YÜKSEK" else "#00C853" if bank['stress_level'] == "DÜŞÜK" else "#FF9800"
+                st.markdown(f"""
+                <div style="text-align: center; padding: 15px; background: {bank_color}22; border-radius: 10px; border: 2px solid {bank_color};">
+                    <p style="margin: 0; color: #888;">🏦 Banka Stresi</p>
+                    <h3 style="color: {bank_color}; margin: 5px 0;">{bank['stress_level']}</h3>
+                    <p style="color: {bank_color}; margin: 0;">{bank['change_30d']:+.1f}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Asset Rotation
+        with geo_cols[3]:
+            if geo_data.get('ratios') and geo_data['ratios'].get('nasdaq_gold'):
+                rot = geo_data['ratios']['nasdaq_gold']
+                rot_color = "#00C853" if rot['rotation'] == "RISK-ON" else "#FF1744" if rot['rotation'] == "RISK-OFF" else "#FF9800"
+                st.markdown(f"""
+                <div style="text-align: center; padding: 15px; background: {rot_color}22; border-radius: 10px; border: 2px solid {rot_color};">
+                    <p style="margin: 0; color: #888;">🔄 Varlık Rotasyonu</p>
+                    <h3 style="color: {rot_color}; margin: 5px 0;">{rot['rotation']}</h3>
+                    <p style="color: {rot_color}; margin: 0;">NQ/Au: {rot['change_30d']:+.1f}%</p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        with st.expander("💡 Göstergeler Hakkında"):
+            st.write("""
+            **Jeopolitik Risk (GPR)**: VIX + Altın volatilitesi bazlı proxy. Yüksekse küresel belirsizlik var.
+            
+            **Küresel Ticaret (BDI)**: Baltic Dry Index - nakliye maliyetleri. Yükseliyorsa ticaret canlı.
+            
+            **Banka Stresi**: KBE/TLT oranı. Düşüyorsa bankalar stres altında.
+            
+            **Varlık Rotasyonu**: Nasdaq/Altın oranı. Yükseliyorsa risk-on, düşüyorsa risk-off.
+            """)
+    else:
+        st.warning(f"Jeopolitik veri alınamadı: {geo_err}")
+    
+    st.divider()
+    
     # ==================== MASTER FEATURES ====================
     with st.expander("🤖 XGBoost Feature Matrix (ML Ready)"):
         if master_features:
             st.json(master_features)
-            st.success(f"✅ {len(master_features)} feature hazır. st.session_state['master_features'] içinde kaydedildi.")
+            st.success(f"✅ {len(master_features)} feature hazır. st.session_state['master_features_final'] içinde kaydedildi.")
         else:
             st.warning("Feature matrix henüz hazır değil.")
 
