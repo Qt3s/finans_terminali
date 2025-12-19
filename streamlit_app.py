@@ -64,7 +64,7 @@ EXCHANGE_CONFIGS = [
     {'name': 'kraken', 'class': 'kraken', 'options': {'enableRateLimit': True}, 'symbol_map': {}},
 ]
 
-CRYPTO_SYMBOLS = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT", "AVAX/USDT", "MATIC/USDT"]
+CRYPTO_SYMBOLS = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT", "AVAX/USDT", "POL/USDT"]
 TIMEFRAMES = {"1 Saat": "1h", "4 Saat": "4h", "1 Gün": "1d", "1 Hafta": "1w"}
 
 # DeFiLlama protokol listesi
@@ -231,6 +231,1029 @@ def fetch_crypto_ohlcv(symbol: str, timeframe: str, limit: int = 200):
             continue
     
     return None, " | ".join(errors), None
+
+
+# ==================== MIKABOT-STYLE ANALİZ MODÜLLER ====================
+
+@st.cache_data(ttl=300, show_spinner=False)
+def calculate_altpower_score():
+    """
+    Binance üzerinden BTC ve 20 majör altcoinin 24H performansını karşılaştırır.
+    BTC'yi geçen altcoin oranını hesaplar.
+    
+    Returns:
+        tuple: (altpower_score: float, btc_change: float)
+        - altpower_score: 0-100 arası skor (BTC'yi geçen altcoin %)
+        - btc_change: BTC'nin 24H değişimi
+    """
+    import ccxt
+    
+    ALTCOINS = [
+        'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT',
+        'DOGE/USDT', 'AVAX/USDT', 'TRX/USDT', 'DOT/USDT', 'POL/USDT',
+        'LTC/USDT', 'LINK/USDT', 'UNI/USDT', 'ATOM/USDT', 'ETC/USDT',
+        'FIL/USDT', 'NEAR/USDT', 'AAVE/USDT', 'QNT/USDT', 'ALGO/USDT'
+    ]
+    
+    try:
+        exchange = ccxt.kucoin({'enableRateLimit': True})
+        
+        # BTC 24H değişimini al
+        btc_ticker = exchange.fetch_ticker('BTC/USDT')
+        btc_change = btc_ticker.get('percentage', 0) or 0
+        
+        # Altcoinlerin kaçı BTC'den iyi performans gösteriyor
+        outperforming = 0
+        
+        for symbol in ALTCOINS:
+            try:
+                ticker = exchange.fetch_ticker(symbol)
+                alt_change = ticker.get('percentage', 0) or 0
+                if alt_change > btc_change:
+                    outperforming += 1
+            except:
+                continue
+        
+        # Skor: (BTC'yi geçen sayısı / 20) * 100
+        altpower_score = (outperforming / 20) * 100
+        
+        return altpower_score, btc_change
+        
+    except Exception as e:
+        # Hata durumunda varsayılan değerler
+        return 50.0, 0.0
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def calculate_altpower():
+    """
+    Top 50 altcoinin BTC paritesindeki 24H değişimlerini analiz eder.
+    Pozitif ayrışanların yüzdesini hesaplar.
+    
+    Returns:
+        dict: altpower_score (0-100), positive_count, total_count, details (top 10)
+    """
+    import ccxt
+    import time
+    
+    try:
+        exchange = ccxt.kucoin({'enableRateLimit': True})
+        markets = exchange.load_markets()
+        
+        # BTC pariteli altcoinleri filtrele (ilk 50)
+        btc_pairs = [s for s in markets if s.endswith('/BTC')][:50]
+        
+        positive_count = 0
+        total_count = 0
+        details = []
+        
+        for symbol in btc_pairs:
+            try:
+                ticker = exchange.fetch_ticker(symbol)
+                change_24h = ticker.get('percentage', 0) or 0
+                details.append({'symbol': symbol.split('/')[0], 'change': change_24h})
+                if change_24h > 0:
+                    positive_count += 1
+                total_count += 1
+                time.sleep(0.5)  # Rate limit önleme
+            except:
+                continue
+        
+        altpower_score = (positive_count / total_count * 100) if total_count > 0 else 50
+        
+        return {
+            'altpower_score': altpower_score,
+            'positive_count': positive_count,
+            'total_count': total_count,
+            'details': sorted(details, key=lambda x: x['change'], reverse=True)[:10]
+        }
+    except Exception as e:
+        return {
+            'altpower_score': 50,
+            'positive_count': 0,
+            'total_count': 0,
+            'details': [],
+            'error': str(e)
+        }
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def calculate_inout_flow():
+    """
+    10 majör coin için son 1 saatlik alış/satış hacim dengesini hesaplar.
+    
+    Returns:
+        list: Her coin için symbol, buy_volume, sell_volume, net_flow, flow_pct, flow_type
+    """
+    import ccxt
+    import time
+    
+    MAJOR_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT',
+                   'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
+    
+    try:
+        exchange = ccxt.kucoin({'enableRateLimit': True})
+        results = []
+        
+        for symbol in MAJOR_COINS:
+            try:
+                # Son 1 saatlik mumları çek (60 dakika = 60 x 1m mumlar)
+                ohlcv = exchange.fetch_ohlcv(symbol, '1m', limit=60)
+                
+                buy_volume = 0
+                sell_volume = 0
+                
+                for candle in ohlcv:
+                    open_p, high, low, close, volume = candle[1:6]
+                    # Kapanış >= Açılış = Alış baskın
+                    if close >= open_p:
+                        buy_volume += volume
+                    else:
+                        sell_volume += volume
+                
+                net_flow = buy_volume - sell_volume
+                total_volume = buy_volume + sell_volume
+                flow_pct = (net_flow / total_volume * 100) if total_volume > 0 else 0
+                
+                results.append({
+                    'symbol': symbol.split('/')[0],
+                    'buy_volume': buy_volume,
+                    'sell_volume': sell_volume,
+                    'net_flow': net_flow,
+                    'flow_pct': flow_pct,
+                    'flow_type': 'BUY' if net_flow > 0 else 'SELL'
+                })
+                
+                time.sleep(0.5)  # Rate limit önleme
+            except Exception:
+                results.append({
+                    'symbol': symbol.split('/')[0],
+                    'buy_volume': 0,
+                    'sell_volume': 0,
+                    'net_flow': 0,
+                    'flow_pct': 0,
+                    'flow_type': 'N/A'
+                })
+        
+        return results
+    except Exception as e:
+        return []
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def calculate_trendstring(symbol: str = 'BTC/USDT'):
+    """
+    Son 5 adet 4H mumun kapanış yönünü +/- olarak gösterir.
+    
+    Args:
+        symbol: Kripto para sembolü (default: BTC/USDT)
+    
+    Returns:
+        dict: trendstring (+/-), visual (emoji), bullish_count
+    """
+    import ccxt
+    
+    try:
+        exchange = ccxt.kucoin({'enableRateLimit': True})
+        ohlcv = exchange.fetch_ohlcv(symbol, '4h', limit=6)  # 6 çek, 5 karşılaştır
+        
+        if len(ohlcv) < 6:
+            return {'trendstring': '?????', 'visual': '❓❓❓❓❓', 'bullish_count': 0}
+        
+        trend_chars = []
+        visual_chars = []
+        bullish_count = 0
+        
+        for i in range(1, 6):  # Son 5 mum
+            prev_close = ohlcv[i-1][4]
+            curr_close = ohlcv[i][4]
+            
+            if curr_close >= prev_close:
+                trend_chars.append('+')
+                visual_chars.append('📈')
+                bullish_count += 1
+            else:
+                trend_chars.append('-')
+                visual_chars.append('📉')
+        
+        return {
+            'trendstring': ''.join(trend_chars),
+            'visual': ''.join(visual_chars),
+            'bullish_count': bullish_count
+        }
+    except Exception as e:
+        return {'trendstring': '?????', 'visual': '❓❓❓❓❓', 'bullish_count': 0, 'error': str(e)}
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_market_radar_data():
+    """
+    Top 10 majör coin için Piyasa Radarı verisi.
+    TrendString (4H mum), InOut momentum skoru ve fiyat bilgisi.
+    
+    Returns:
+        list: Her coin için radar verisi (symbol, price, trend, inout, change)
+    """
+    import ccxt
+    import time
+    
+    TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
+                 'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
+    
+    try:
+        exchange = ccxt.kucoin({'enableRateLimit': True})
+        results = []
+        
+        # Önce tüm tickerları çek (hacim ortalaması için)
+        all_volumes = []
+        tickers_cache = {}
+        
+        for symbol in TOP_COINS:
+            try:
+                ticker = exchange.fetch_ticker(symbol)
+                tickers_cache[symbol] = ticker
+                quote_vol = ticker.get('quoteVolume', 0) or 0
+                all_volumes.append(quote_vol)
+            except:
+                continue
+        
+        avg_volume = sum(all_volumes) / len(all_volumes) if all_volumes else 1
+        
+        for symbol in TOP_COINS:
+            try:
+                ticker = tickers_cache.get(symbol)
+                if not ticker:
+                    ticker = exchange.fetch_ticker(symbol)
+                
+                price = ticker.get('last', 0) or 0
+                change_24h = ticker.get('percentage', 0) or 0
+                quote_volume = ticker.get('quoteVolume', 0) or 0
+                
+                # ===== TRENDSTRING: Son 5 adet 4H mum =====
+                ohlcv = exchange.fetch_ohlcv(symbol, '4h', limit=5)
+                trend_chars = []
+                trend_html = []
+                
+                for candle in ohlcv:
+                    open_p, high, low, close = candle[1:5]
+                    if close >= open_p:
+                        trend_chars.append('+')
+                        trend_html.append('<span style="color:#00C853;">+</span>')
+                    else:
+                        trend_chars.append('-')
+                        trend_html.append('<span style="color:#FF1744;">-</span>')
+                
+                trendstring = ''.join(trend_chars)
+                trend_colored = ''.join(trend_html)
+                
+                # ===== INOUT MOMENTUM SKORU =====
+                # Skor = (Fiyat Değişimi %) × (Hacim / Ortalama Hacim)
+                volume_ratio = quote_volume / avg_volume if avg_volume > 0 else 1
+                inout_score = change_24h * volume_ratio
+                
+                # InOut durumu belirleme
+                if inout_score > 5:
+                    inout_status = "🟢 Güçlü Giriş"
+                elif inout_score > 1:
+                    inout_status = "🟢 Giriş"
+                elif inout_score < -5:
+                    inout_status = "🔴 Güçlü Çıkış"
+                elif inout_score < -1:
+                    inout_status = "🔴 Çıkış"
+                else:
+                    inout_status = "⚪ Nötr"
+                
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'Fiyat': price,
+                    'TrendString': trendstring,
+                    'TrendHTML': trend_colored,
+                    'InOut': inout_status,
+                    'InOutScore': inout_score,
+                    '24s Değişim': change_24h
+                })
+                
+                time.sleep(0.3)  # Rate limit önleme
+                
+            except Exception as e:
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'Fiyat': 0,
+                    'TrendString': '?????',
+                    'TrendHTML': '?????',
+                    'InOut': '❓ Veri Yok',
+                    'InOutScore': 0,
+                    '24s Değişim': 0
+                })
+        
+        return results
+        
+    except Exception as e:
+        return []
+
+
+# ==================== DERİN ANALİZ MODÜLLER ====================
+
+@st.cache_data(ttl=600, show_spinner=False)
+def calculate_squeeze_volatility():
+    """
+    SVI (Squeeze Volatility Index) - Bollinger Band sıkışma tespiti.
+    Bandwidth küçük = Fiyat patlayabilir.
+    
+    Returns:
+        list: Her coin için sıkışma durumu
+    """
+    import ccxt
+    import numpy as np
+    
+    TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
+                 'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
+    
+    SQUEEZE_THRESHOLD = 0.04  # %4'ün altı sıkışma
+    
+    try:
+        exchange = ccxt.kucoin({'enableRateLimit': True})
+        results = []
+        
+        for symbol in TOP_COINS:
+            try:
+                # Son 20 mum (Bollinger için standart)
+                ohlcv = exchange.fetch_ohlcv(symbol, '4h', limit=20)
+                closes = np.array([c[4] for c in ohlcv])
+                
+                # Bollinger Bantları
+                sma = np.mean(closes)
+                std = np.std(closes)
+                upper = sma + (2 * std)
+                lower = sma - (2 * std)
+                
+                # Bandwidth hesaplama
+                bandwidth = (upper - lower) / sma if sma > 0 else 0
+                
+                # Sıkışma durumu
+                if bandwidth < SQUEEZE_THRESHOLD:
+                    squeeze_status = "🔥 Sıkışıyor"
+                    squeeze_alert = True
+                elif bandwidth < SQUEEZE_THRESHOLD * 1.5:
+                    squeeze_status = "⚠️ Dikkat"
+                    squeeze_alert = False
+                else:
+                    squeeze_status = "✅ Normal"
+                    squeeze_alert = False
+                
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'Bandwidth': bandwidth * 100,  # Yüzde olarak
+                    'SqueezeStatus': squeeze_status,
+                    'SqueezeAlert': squeeze_alert,
+                    'Price': closes[-1] if len(closes) > 0 else 0
+                })
+                
+            except:
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'Bandwidth': 0,
+                    'SqueezeStatus': '❓ Veri Yok',
+                    'SqueezeAlert': False,
+                    'Price': 0
+                })
+        
+        return results
+        
+    except Exception as e:
+        return []
+
+
+@st.cache_data(ttl=1800, show_spinner=False)  # 30 dakika cache
+def fetch_correlation_matrix():
+    """
+    Son 30 günlük fiyat korelasyonu matrisi.
+    
+    Returns:
+        tuple: (correlation_matrix, coin_list)
+    """
+    import yfinance as yf
+    import numpy as np
+    
+    COINS = ['BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD', 'BNB-USD',
+             'ADA-USD', 'DOGE-USD', 'AVAX-USD', 'DOT-USD', 'MATIC-USD']
+    
+    try:
+        # Tüm coinlerin 30 günlük kapanış fiyatlarını çek
+        closes_dict = {}
+        
+        for coin in COINS:
+            try:
+                ticker = yf.Ticker(coin)
+                hist = ticker.history(period='30d')
+                if not hist.empty:
+                    closes_dict[coin.replace('-USD', '')] = hist['Close'].values
+            except:
+                continue
+        
+        if len(closes_dict) < 3:
+            return None, []
+        
+        # DataFrame oluştur ve korelasyon hesapla
+        df = pd.DataFrame(closes_dict)
+        
+        # Eksik günleri doldur
+        df = df.ffill().bfill()
+        
+        # Korelasyon matrisi
+        corr_matrix = df.corr()
+        
+        return corr_matrix, list(closes_dict.keys())
+        
+    except Exception as e:
+        return None, []
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def calculate_smart_scores():
+    """
+    Smart Score - Her coin için tek kalite puanı.
+    
+    Formül: (Trend * 0.4) + (Hacim * 0.4) + (Volatilite * 0.2)
+    
+    Returns:
+        list: Her coin için Smart Score (0-100)
+    """
+    import ccxt
+    import numpy as np
+    
+    TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
+                 'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
+    
+    try:
+        exchange = ccxt.kucoin({'enableRateLimit': True})
+        results = []
+        
+        # Ortalama hacim için tüm verileri topla
+        all_volumes = []
+        all_data = {}
+        
+        for symbol in TOP_COINS:
+            try:
+                ticker = exchange.fetch_ticker(symbol)
+                ohlcv = exchange.fetch_ohlcv(symbol, '4h', limit=14)  # RSI için 14 periyot
+                
+                all_data[symbol] = {
+                    'ticker': ticker,
+                    'ohlcv': ohlcv
+                }
+                all_volumes.append(ticker.get('quoteVolume', 0) or 0)
+            except:
+                continue
+        
+        avg_volume = np.mean(all_volumes) if all_volumes else 1
+        
+        for symbol in TOP_COINS:
+            try:
+                data = all_data.get(symbol)
+                if not data:
+                    continue
+                
+                ticker = data['ticker']
+                ohlcv = data['ohlcv']
+                closes = np.array([c[4] for c in ohlcv])
+                
+                # ===== TREND PUANI (0-100) =====
+                # RSI hesaplama
+                if len(closes) >= 14:
+                    deltas = np.diff(closes)
+                    gains = np.where(deltas > 0, deltas, 0)
+                    losses = np.where(deltas < 0, -deltas, 0)
+                    avg_gain = np.mean(gains[-14:])
+                    avg_loss = np.mean(losses[-14:])
+                    rs = avg_gain / avg_loss if avg_loss > 0 else 100
+                    rsi = 100 - (100 / (1 + rs))
+                else:
+                    rsi = 50
+                
+                # EMA durumu (fiyat EMA üstünde mi?)
+                ema_20 = np.mean(closes[-20:]) if len(closes) >= 20 else np.mean(closes)
+                price = closes[-1] if len(closes) > 0 else 0
+                ema_bonus = 20 if price > ema_20 else 0
+                
+                # RSI'ı 0-80 aralığına normalize et, EMA bonus ekle
+                trend_score = min(100, max(0, (rsi * 0.8) + ema_bonus))
+                
+                # ===== HACİM PUANI (0-100) =====
+                quote_volume = ticker.get('quoteVolume', 0) or 0
+                volume_ratio = quote_volume / avg_volume if avg_volume > 0 else 1
+                volume_score = min(100, volume_ratio * 50)  # 2x ortalama = 100 puan
+                
+                # ===== VOLATİLİTE PUANI (0-100) =====
+                # Düşük volatilite = sıkışma = yüksek puan
+                if len(closes) >= 20:
+                    std = np.std(closes[-20:])
+                    mean = np.mean(closes[-20:])
+                    bandwidth = (std * 2) / mean if mean > 0 else 0
+                    # Düşük bandwidth = yüksek puan
+                    volatility_score = max(0, 100 - (bandwidth * 1000))
+                else:
+                    volatility_score = 50
+                
+                # ===== SMART SCORE =====
+                smart_score = (trend_score * 0.4) + (volume_score * 0.4) + (volatility_score * 0.2)
+                smart_score = min(100, max(0, smart_score))
+                
+                # Grade belirleme
+                if smart_score >= 75:
+                    grade = "🟢 A"
+                elif smart_score >= 60:
+                    grade = "🟡 B"
+                elif smart_score >= 40:
+                    grade = "🟠 C"
+                else:
+                    grade = "🔴 D"
+                
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'SmartScore': smart_score,
+                    'Grade': grade,
+                    'TrendScore': trend_score,
+                    'VolumeScore': volume_score,
+                    'VolatilityScore': volatility_score,
+                    'RSI': rsi,
+                    'Price': price
+                })
+                
+            except:
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'SmartScore': 0,
+                    'Grade': '❓',
+                    'TrendScore': 0,
+                    'VolumeScore': 0,
+                    'VolatilityScore': 0,
+                    'RSI': 0,
+                    'Price': 0
+                })
+        
+        # Skora göre sırala
+        results = sorted(results, key=lambda x: x['SmartScore'], reverse=True)
+        return results
+        
+    except Exception as e:
+        return []
+
+
+# ==================== PİYASA DERİNLİĞİ VE DUYGU MODÜLLERİ ====================
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_funding_rates():
+    """
+    Piyasa Sentiment Göstergesi - Fiyat momentumu bazlı.
+    (Binance Futures Türkiye'den erişilemediği için alternatif yöntem)
+    
+    Returns:
+        list: Her coin için sentiment verisi
+    """
+    import ccxt
+    import numpy as np
+    
+    TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
+                 'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
+    
+    try:
+        exchange = ccxt.kucoin({'enableRateLimit': True})
+        results = []
+        
+        for symbol in TOP_COINS:
+            try:
+                # Son 24 saat ve 1 saatlik veriler
+                ticker = exchange.fetch_ticker(symbol)
+                change_24h = ticker.get('percentage', 0) or 0
+                
+                # Son 4 saatlik mumları çek
+                ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=4)
+                if len(ohlcv) >= 4:
+                    recent_closes = [c[4] for c in ohlcv]
+                    momentum = ((recent_closes[-1] - recent_closes[0]) / recent_closes[0]) * 100
+                else:
+                    momentum = change_24h / 6  # Tahmini
+                
+                # Simüle edilmiş "Funding Rate" (momentum bazlı)
+                simulated_rate = momentum * 0.01  # Ölçeklendirme
+                
+                # Sentiment belirleme
+                if change_24h > 5 and momentum > 1:
+                    sentiment = "🔴 Aşırı Long"
+                    risk = "Düşüş Riski"
+                elif change_24h < -5 and momentum < -1:
+                    sentiment = "🟢 Aşırı Short"
+                    risk = "Squeeze Fırsatı"
+                elif change_24h > 2:
+                    sentiment = "🟠 Long Baskın"
+                    risk = "Dikkat"
+                elif change_24h < -2:
+                    sentiment = "🟢 Short Baskın"
+                    risk = "Fırsat Olabilir"
+                else:
+                    sentiment = "🟡 Nötr"
+                    risk = "Dengeli"
+                
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'FundingRate': simulated_rate,
+                    'Sentiment': sentiment,
+                    'Risk': risk
+                })
+                
+            except:
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'FundingRate': 0,
+                    'Sentiment': '❓ Veri Yok',
+                    'Risk': '-'
+                })
+        
+        return results
+        
+    except Exception as e:
+        return []
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def calculate_orderbook_imbalance():
+    """
+    Order Book Imbalance - Alış/Satış duvar analizi.
+    Bid/Ask Ratio: ((Bids - Asks) / (Bids + Asks)) * 100
+    
+    Returns:
+        list: Her coin için imbalance verisi
+    """
+    import ccxt
+    
+    TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
+                 'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
+    
+    try:
+        exchange = ccxt.kucoin({'enableRateLimit': True})
+        results = []
+        
+        for symbol in TOP_COINS:
+            try:
+                # Order book çek (ilk 20 kademe)
+                orderbook = exchange.fetch_order_book(symbol, limit=20)
+                
+                # Toplam bids ve asks hacmi
+                total_bids = sum([bid[1] for bid in orderbook['bids']])
+                total_asks = sum([ask[1] for ask in orderbook['asks']])
+                
+                # Imbalance hesapla
+                if (total_bids + total_asks) > 0:
+                    imbalance = ((total_bids - total_asks) / (total_bids + total_asks)) * 100
+                else:
+                    imbalance = 0
+                
+                # Durum belirleme
+                if imbalance > 10:
+                    status = "🟢 Alıcılar Güçlü"
+                elif imbalance < -10:
+                    status = "🔴 Satıcılar Baskın"
+                else:
+                    status = "🟡 Dengeli"
+                
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'Imbalance': imbalance,
+                    'TotalBids': total_bids,
+                    'TotalAsks': total_asks,
+                    'Status': status
+                })
+                
+            except:
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'Imbalance': 0,
+                    'TotalBids': 0,
+                    'TotalAsks': 0,
+                    'Status': '❓ Veri Yok'
+                })
+        
+        return results
+        
+    except Exception as e:
+        return []
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def detect_volume_anomalies():
+    """
+    Anomali Radarı - Hacim patlamalarını tespit et.
+    3-Sigma kuralı: Son hacim > Ortalama * 3 ise anomali.
+    
+    Returns:
+        list: Her coin için anomali verisi
+    """
+    import ccxt
+    import numpy as np
+    
+    TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
+                 'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
+    
+    try:
+        exchange = ccxt.kucoin({'enableRateLimit': True})
+        results = []
+        
+        for symbol in TOP_COINS:
+            try:
+                # Son 24 saatlik 1h mumları çek
+                ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=24)
+                volumes = np.array([c[5] for c in ohlcv])
+                
+                # Son 1 saatlik hacim
+                last_volume = volumes[-1] if len(volumes) > 0 else 0
+                
+                # Ortalama ve standart sapma
+                avg_volume = np.mean(volumes)
+                std_volume = np.std(volumes)
+                
+                # Z-Score hesapla
+                z_score = (last_volume - avg_volume) / std_volume if std_volume > 0 else 0
+                
+                # Anomali tespiti (3-sigma)
+                if z_score >= 3:
+                    anomaly = "🚨 PATLAMA!"
+                    is_anomaly = True
+                elif z_score >= 2:
+                    anomaly = "⚠️ Yüksek"
+                    is_anomaly = False
+                else:
+                    anomaly = "✅ Normal"
+                    is_anomaly = False
+                
+                # Oran hesapla
+                ratio = last_volume / avg_volume if avg_volume > 0 else 1
+                
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'LastVolume': last_volume,
+                    'AvgVolume': avg_volume,
+                    'Ratio': ratio,
+                    'ZScore': z_score,
+                    'Anomaly': anomaly,
+                    'IsAnomaly': is_anomaly
+                })
+                
+            except:
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'LastVolume': 0,
+                    'AvgVolume': 0,
+                    'Ratio': 0,
+                    'ZScore': 0,
+                    'Anomaly': '❓ Veri Yok',
+                    'IsAnomaly': False
+                })
+        
+        return results
+        
+    except Exception as e:
+        return []
+
+
+# ==================== KESKİN NİŞANCI MODÜLÜ (SNIPER MODE) ====================
+
+@st.cache_data(ttl=600, show_spinner=False)
+def calculate_channel_bender():
+    """
+    Channel Bender - Fiyatın kanal sınırlarından sapma skoru.
+    Bollinger Bantları üzerinden hesaplanır.
+    
+    Skor > 1.0: Aşırı alım (kanal üstü taşma)
+    Skor < -1.0: Aşırı satım (kanal altı taşma)
+    
+    Returns:
+        list: Her coin için sapma skoru
+    """
+    import ccxt
+    import numpy as np
+    
+    TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
+                 'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
+    
+    try:
+        exchange = ccxt.kucoin({'enableRateLimit': True})
+        results = []
+        
+        for symbol in TOP_COINS:
+            try:
+                # Son 20 periyot (4h mumları)
+                ohlcv = exchange.fetch_ohlcv(symbol, '4h', limit=20)
+                closes = np.array([c[4] for c in ohlcv])
+                
+                # Bollinger Bantları
+                middle = np.mean(closes)  # SMA(20)
+                std = np.std(closes)
+                upper = middle + (2 * std)
+                lower = middle - (2 * std)
+                
+                # Mevcut fiyat
+                current_price = closes[-1]
+                
+                # Sapma Skoru: (Fiyat - Orta) / (Üst - Orta)
+                if (upper - middle) > 0:
+                    deviation_score = (current_price - middle) / (upper - middle)
+                else:
+                    deviation_score = 0
+                
+                # Yorum belirleme
+                if deviation_score > 1.0:
+                    status = "🔴 Aşırı Alım"
+                    zone = "Kanal Üstü"
+                elif deviation_score > 0.5:
+                    status = "🟠 Yüksek"
+                    zone = "Üst Bölge"
+                elif deviation_score < -1.0:
+                    status = "🟢 Aşırı Satım"
+                    zone = "Kanal Altı"
+                elif deviation_score < -0.5:
+                    status = "🟢 Düşük"
+                    zone = "Alt Bölge"
+                else:
+                    status = "🟡 Dengeli"
+                    zone = "Orta Bölge"
+                
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'Price': current_price,
+                    'Middle': middle,
+                    'Upper': upper,
+                    'Lower': lower,
+                    'DeviationScore': deviation_score,
+                    'Status': status,
+                    'Zone': zone
+                })
+                
+            except:
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'Price': 0,
+                    'Middle': 0,
+                    'Upper': 0,
+                    'Lower': 0,
+                    'DeviationScore': 0,
+                    'Status': '❓ Veri Yok',
+                    'Zone': '-'
+                })
+        
+        return results
+        
+    except Exception as e:
+        return []
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def detect_pump_corrections():
+    """
+    Pump & Correction Radar - Ani yükselen coinlere Fibonacci düzeltme seviyeleri.
+    Son 1 saatte %5+ yükselenler için Fib seviyeleri hesaplar.
+    
+    Returns:
+        list: Pumped coinler ve Fibonacci seviyeleri
+    """
+    import ccxt
+    
+    TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
+                 'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
+    
+    PUMP_THRESHOLD = 5.0  # %5 eşik
+    
+    try:
+        exchange = ccxt.kucoin({'enableRateLimit': True})
+        results = []
+        
+        for symbol in TOP_COINS:
+            try:
+                # Son 24 saatlik veriler
+                ohlcv_24h = exchange.fetch_ohlcv(symbol, '1h', limit=24)
+                
+                # Son 1 saatlik değişim
+                if len(ohlcv_24h) >= 2:
+                    close_now = ohlcv_24h[-1][4]
+                    close_1h_ago = ohlcv_24h[-2][4]
+                    change_1h = ((close_now - close_1h_ago) / close_1h_ago) * 100
+                else:
+                    change_1h = 0
+                
+                # Pump kontrolü
+                if change_1h >= PUMP_THRESHOLD:
+                    # 24h Min/Max
+                    highs = [c[2] for c in ohlcv_24h]
+                    lows = [c[3] for c in ohlcv_24h]
+                    high_24h = max(highs)
+                    low_24h = min(lows)
+                    
+                    range_24h = high_24h - low_24h
+                    
+                    # Fibonacci Seviyeleri
+                    fib_382 = high_24h - (range_24h * 0.382)
+                    fib_500 = high_24h - (range_24h * 0.500)
+                    fib_618 = high_24h - (range_24h * 0.618)
+                    
+                    results.append({
+                        'Coin': symbol.split('/')[0],
+                        'Price': close_now,
+                        'Change1H': change_1h,
+                        'High24H': high_24h,
+                        'Low24H': low_24h,
+                        'Fib382': fib_382,
+                        'Fib500': fib_500,
+                        'Fib618': fib_618,
+                        'IsPumping': True
+                    })
+                    
+            except:
+                continue
+        
+        # Değişime göre sırala
+        results = sorted(results, key=lambda x: x['Change1H'], reverse=True)
+        return results
+        
+    except Exception as e:
+        return []
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def calculate_support_resistance():
+    """
+    Otomatik Destek/Direnç - Local Min/Max noktalarından hesaplama.
+    Son 50 mumda en yakın destek ve direnç seviyeleri.
+    
+    Returns:
+        list: Her coin için destek ve direnç seviyeleri
+    """
+    import ccxt
+    import numpy as np
+    from scipy.signal import argrelextrema
+    
+    TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
+                 'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
+    
+    try:
+        exchange = ccxt.kucoin({'enableRateLimit': True})
+        results = []
+        
+        for symbol in TOP_COINS:
+            try:
+                # Son 50 mum (4h)
+                ohlcv = exchange.fetch_ohlcv(symbol, '4h', limit=50)
+                highs = np.array([c[2] for c in ohlcv])
+                lows = np.array([c[3] for c in ohlcv])
+                closes = np.array([c[4] for c in ohlcv])
+                
+                current_price = closes[-1]
+                
+                # Local maxima (direnç seviyeleri)
+                local_max_idx = argrelextrema(highs, np.greater, order=3)[0]
+                resistance_levels = highs[local_max_idx] if len(local_max_idx) > 0 else []
+                
+                # Local minima (destek seviyeleri)
+                local_min_idx = argrelextrema(lows, np.less, order=3)[0]
+                support_levels = lows[local_min_idx] if len(local_min_idx) > 0 else []
+                
+                # En yakın direnç (fiyatın üstündekiler)
+                resistances_above = [r for r in resistance_levels if r > current_price]
+                nearest_resistance = min(resistances_above) if resistances_above else highs.max()
+                
+                # En yakın destek (fiyatın altındakiler)
+                supports_below = [s for s in support_levels if s < current_price]
+                nearest_support = max(supports_below) if supports_below else lows.min()
+                
+                # Fiyatın konumu
+                range_sr = nearest_resistance - nearest_support
+                if range_sr > 0:
+                    position_pct = ((current_price - nearest_support) / range_sr) * 100
+                else:
+                    position_pct = 50
+                
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'Price': current_price,
+                    'Support': nearest_support,
+                    'Resistance': nearest_resistance,
+                    'PositionPct': position_pct,
+                    'RangePct': (range_sr / current_price) * 100 if current_price > 0 else 0
+                })
+                
+            except:
+                results.append({
+                    'Coin': symbol.split('/')[0],
+                    'Price': 0,
+                    'Support': 0,
+                    'Resistance': 0,
+                    'PositionPct': 50,
+                    'RangePct': 0
+                })
+        
+        return results
+        
+    except Exception as e:
+        return []
 
 
 @st.cache_data(ttl=900, show_spinner=False)
@@ -1775,6 +2798,449 @@ def render_dashboard():
     
     st.divider()
     
+    # ==================== 📡 PİYASA RADARI ====================
+    st.markdown("### 📡 Piyasa Radarı")
+    st.caption("Top 10 Majör Coin - TrendString (4H) ve Nakit Akış Analizi")
+    
+    with st.spinner("Piyasa radarı verileri yükleniyor..."):
+        radar_data = fetch_market_radar_data()
+    
+    if radar_data:
+        # DataFrame oluştur
+        df_radar = pd.DataFrame(radar_data)
+        
+        # Görüntülenecek sütunları seç ve formatla
+        df_display = df_radar[['Coin', 'Fiyat', 'TrendString', 'InOut', '24s Değişim']].copy()
+        
+        # Fiyat formatlama
+        df_display['Fiyat'] = df_display['Fiyat'].apply(
+            lambda x: f"${x:,.0f}" if x > 100 else f"${x:,.4f}" if x < 1 else f"${x:,.2f}"
+        )
+        
+        # 24s Değişim formatlama
+        df_display['24s Değişim'] = df_display['24s Değişim'].apply(lambda x: f"{x:+.2f}%")
+        
+        # TrendString renkli görüntüleme
+        def color_trend(val):
+            colored = ""
+            for char in val:
+                if char == '+':
+                    colored += '<span style="color:#00C853;font-weight:bold;">+</span>'
+                elif char == '-':
+                    colored += '<span style="color:#FF1744;font-weight:bold;">-</span>'
+                else:
+                    colored += char
+            return colored
+        
+        # InOut renkli görüntüleme
+        def color_inout(val):
+            if 'Giriş' in val:
+                return f'<span style="color:#00C853;">{val}</span>'
+            elif 'Çıkış' in val:
+                return f'<span style="color:#FF1744;">{val}</span>'
+            return val
+        
+        # Pandas Styler ile formatlama
+        def highlight_trend(val):
+            color = "#00C853" if '+' in val else "#FF1744"
+            return f'color: {color}; font-family: monospace; font-weight: bold;'
+
+        def highlight_change(val):
+            try:
+                # % işaretini kaldırıp sayıya çevir
+                num = float(val.replace('%', '').replace('+', ''))
+                color = "#00C853" if num >= 0 else "#FF1744"
+                return f'color: {color}'
+            except:
+                return ''
+
+        # Display için yeni DF hazırla (Ham verilerden)
+        df_radar_view = df_radar[['Coin', 'Fiyat', 'TrendString', 'InOut', '24s Değişim']].copy()
+        
+        # Kolon isimlerini Türkçeleştir
+        df_radar_view.columns = ['Coin', 'Fiyat ($)', 'Trend (4H)', 'Nakit Akış', '24H (%)']
+
+        # Styler uygula (CSS yerine)
+        st.dataframe(
+            df_radar_view,
+            column_config={
+                "Coin": st.column_config.TextColumn("Coin", width="small"),
+                "Fiyat ($)": st.column_config.NumberColumn("Fiyat", format="$%.2f"),
+                "Trend (4H)": st.column_config.TextColumn("Trend", width="medium"), # TrendString özel font gerektirir ama dataframe kısıtlı
+                "Nakit Akış": st.column_config.TextColumn("Nakit Akış", width="medium"),
+                "24H (%)": st.column_config.NumberColumn("24H", format="%.2f%%")
+            },
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        with st.expander("💡 Piyasa Radarı Nasıl Okunur?"):
+            st.markdown("""
+            **TrendString (Trend Dizisi)**: Son 5 adet 4 saatlik mumun yönü.
+            - `+` = Yeşil mum (kapanış > açılış)
+            - `-` = Kırmızı mum (kapanış < açılış)
+            - Örnek: `++--+` = 3 yükseliş, 2 düşüş
+            
+            **Nakit Akış (InOut)**: Hacim ağırlıklı fiyat değişimi.
+            - 🟢 **Güçlü Giriş**: Yüksek hacimle yükseliş (para giriyor)
+            - 🔴 **Güçlü Çıkış**: Yüksek hacimle düşüş (para çıkıyor)
+            - ⚪ **Nötr**: Dengeli durum
+            """)
+    else:
+        st.warning("Piyasa radarı verisi yüklenemedi.")
+    
+    st.divider()
+    
+    # ==================== 🔍 DERİN ANALİZ LABORATUVARI ====================
+    with st.expander("🔍 Derin Analiz Laboratuvarı", expanded=False):
+        st.caption("Gelişmiş teknik analiz araçları: Korelasyon, Smart Score, Sıkışma Analizi")
+        
+        lab_tabs = st.tabs(["📊 Smart Score", "🔥 Sıkışma Analizi", "🌡️ Korelasyon Haritası"])
+        
+        # ===== SMART SCORE TAB =====
+        with lab_tabs[0]:
+            st.markdown("#### 📊 Smart Score Sıralaması")
+            st.caption("Trend (40%) + Hacim (40%) + Volatilite (20%) = Toplam Kalite Puanı")
+            
+            with st.spinner("Smart Score hesaplanıyor..."):
+                smart_data = calculate_smart_scores()
+            
+            if smart_data:
+                df_ss = pd.DataFrame(smart_data)
+                # İstenilen sütunları seç
+                df_ss = df_ss[['Coin', 'SmartScore', 'Grade', 'TrendScore', 'VolumeScore', 'RSI']]
+                
+                st.dataframe(
+                    df_ss,
+                    column_config={
+                        "Coin": st.column_config.TextColumn("Coin", width="small"),
+                        "SmartScore": st.column_config.NumberColumn("Smart Score", format="%.0f"),
+                        "Grade": st.column_config.TextColumn("Grade", width="small"),
+                        "TrendScore": st.column_config.NumberColumn("Trend", format="%.0f"),
+                        "VolumeScore": st.column_config.NumberColumn("Hacim", format="%.0f"),
+                        "RSI": st.column_config.NumberColumn("RSI", format="%.0f")
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                st.markdown("""
+                **Grade Sistemi**: 🟢 A (≥75) | 🟡 B (≥60) | 🟠 C (≥40) | 🔴 D (<40)
+                """)
+            else:
+                st.warning("Smart Score verisi yüklenemedi.")
+        
+        # ===== SIKIŞMA ANALİZİ TAB =====
+        with lab_tabs[1]:
+            st.markdown("#### 🔥 Volatilite Sıkışması (Bollinger Bandwidth)")
+            st.caption("Düşük bandwidth = Fiyat patlayabilir!")
+            
+            with st.spinner("Sıkışma analizi yapılıyor..."):
+                squeeze_data = calculate_squeeze_volatility()
+            
+            if squeeze_data:
+                # Sıkışan coinleri öne çıkar
+                alerts = [s for s in squeeze_data if s['SqueezeAlert']]
+                
+                if alerts:
+                    st.warning(f"⚠️ {len(alerts)} coin sıkışma bölgesinde!")
+                
+                df_sq = pd.DataFrame(squeeze_data)
+                df_sq = df_sq.sort_values(by='Bandwidth')
+                df_sq = df_sq[['Coin', 'Bandwidth', 'SqueezeStatus']]
+                
+                st.dataframe(
+                    df_sq,
+                    column_config={
+                        "Coin": st.column_config.TextColumn("Coin", width="small"),
+                        "Bandwidth": st.column_config.NumberColumn("Bandwidth %", format="%.2f%%"),
+                        "SqueezeStatus": st.column_config.TextColumn("Durum", width="medium")
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                st.markdown("""
+                **Yorum**: Bandwidth %4'ün altına düştüğünde fiyat genellikle güçlü bir hareket yapar (yukarı veya aşağı).
+                """)
+            else:
+                st.warning("Sıkışma verisi yüklenemedi.")
+        
+        # ===== KORELASYON HARİTASI TAB =====
+        with lab_tabs[2]:
+            st.markdown("#### 🌡️ 30 Günlük Korelasyon Isı Haritası")
+            st.caption("Coinler arasındaki fiyat ilişkisi (-1 ile +1 arası)")
+            
+            with st.spinner("Korelasyon matrisi hesaplanıyor..."):
+                corr_matrix, coins = fetch_correlation_matrix()
+            
+            if corr_matrix is not None and len(coins) > 0:
+                import plotly.express as px
+                
+                fig = px.imshow(
+                    corr_matrix,
+                    labels=dict(x="Coin", y="Coin", color="Korelasyon"),
+                    x=coins,
+                    y=coins,
+                    color_continuous_scale='RdBu_r',  # Kırmızı-Beyaz-Mavi
+                    zmin=-1,
+                    zmax=1,
+                    aspect='auto'
+                )
+                
+                fig.update_layout(
+                    template='plotly_dark',
+                    height=400,
+                    margin=dict(l=0, r=0, t=30, b=0),
+                    title=None
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                st.markdown("""
+                | Değer | Anlam |
+                |-------|-------|
+                | **+1.0** | Mükemmel pozitif korelasyon (beraber hareket) |
+                | **0.0** | Korelasyon yok (bağımsız) |
+                | **-1.0** | Negatif korelasyon (ters hareket) |
+                """)
+            else:
+                st.warning("Korelasyon verisi yüklenemedi.")
+    
+    st.divider()
+    
+    # ==================== 📡 PİYASA DERİNLİĞİ VE DUYGU ====================
+    with st.expander("📡 Piyasa Derinliği ve Duygu", expanded=False):
+        st.caption("Futures sentiment, emir defteri dengesizliği ve hacim anomalileri")
+        
+        depth_tabs = st.tabs(["💰 Funding Rate", "📊 Order Book", "🚨 Anomali Radarı"])
+        
+        # ===== FUNDING RATE TAB =====
+        with depth_tabs[0]:
+            st.markdown("#### 💰 Funding Rate Analizi (Futures Sentiment)")
+            st.caption("Long/Short pozisyon yığılmasını gösterir")
+            
+            with st.spinner("Funding rate verileri çekiliyor..."):
+                funding_data = fetch_funding_rates()
+            
+            if funding_data:
+                df_fr = pd.DataFrame(funding_data)
+                df_fr = df_fr[['Coin', 'FundingRate', 'Sentiment', 'Risk']]
+                
+                st.dataframe(
+                    df_fr,
+                    column_config={
+                        "Coin": st.column_config.TextColumn("Coin", width="small"),
+                        "FundingRate": st.column_config.NumberColumn("Funding Rate", format="%.4f%%"),
+                        "Sentiment": st.column_config.TextColumn("Sentiment", width="medium"),
+                        "Risk": st.column_config.TextColumn("Risk", width="medium")
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                st.markdown("""
+                **Yorumlama**:
+                - 🔴 **Aşırı Long** (>0.01%): Çok fazla yükseliş beklentisi, düşüş riski
+                - 🟢 **Aşırı Short** (<0%): Short squeeze fırsatı olabilir
+                - 🟡 **Nötr**: Dengeli piyasa
+                """)
+            else:
+                st.warning("Funding rate verisi yüklenemedi.")
+        
+        # ===== ORDER BOOK TAB =====
+        with depth_tabs[1]:
+            st.markdown("#### 📊 Emir Defteri Dengesizliği")
+            st.caption("Alış/Satış duvarları (ilk 20 kademe)")
+            
+            with st.spinner("Order book verileri çekiliyor..."):
+                orderbook_data = calculate_orderbook_imbalance()
+            
+            if orderbook_data:
+                df_ob = pd.DataFrame(orderbook_data)
+                df_ob = df_ob.sort_values(by='Imbalance', key=abs, ascending=False)
+                df_ob = df_ob[['Coin', 'Imbalance', 'Status']]
+                
+                st.dataframe(
+                    df_ob,
+                    column_config={
+                        "Coin": st.column_config.TextColumn("Coin", width="small"),
+                        "Imbalance": st.column_config.NumberColumn("Imbalance", format="%+.1f%%"),
+                        "Status": st.column_config.TextColumn("Durum", width="medium")
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                st.markdown("""
+                **Formül**: `((Bids - Asks) / (Bids + Asks)) × 100`
+                - **Pozitif (+)**: Alıcılar güçlü, yukarı baskı
+                - **Negatif (-)**: Satıcılar baskın, aşağı baskı
+                """)
+            else:
+                st.warning("Order book verisi yüklenemedi.")
+        
+        # ===== ANOMALİ RADARI TAB =====
+        with depth_tabs[2]:
+            st.markdown("#### 🚨 Hacim Anomali Radarı")
+            st.caption("3-Sigma kuralı ile pump/dump tespiti")
+            
+            with st.spinner("Hacim verileri analiz ediliyor..."):
+                anomaly_data = detect_volume_anomalies()
+            
+            if anomaly_data:
+                # Anomali uyarıları
+                anomalies = [a for a in anomaly_data if a['IsAnomaly']]
+                if anomalies:
+                    for a in anomalies:
+                        st.error(f"🚨 **{a['Coin']}**: Hacim patlaması tespit edildi! (Oran: {a['Ratio']:.1f}x)")
+                
+                df_an = pd.DataFrame(anomaly_data)
+                df_an = df_an.sort_values(by='ZScore', ascending=False)
+                df_an = df_an[['Coin', 'Ratio', 'ZScore', 'Anomaly']]
+                
+                st.dataframe(
+                    df_an,
+                    column_config={
+                        "Coin": st.column_config.TextColumn("Coin", width="small"),
+                        "Ratio": st.column_config.NumberColumn("Hacim Oranı", format="%.2fx"),
+                        "ZScore": st.column_config.NumberColumn("Z-Score", format="%.1fσ"),
+                        "Anomaly": st.column_config.TextColumn("Durum", width="medium")
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                st.markdown("""
+                **Z-Score Yorumu**:
+                - **≥3σ**: 🚨 Anormal hacim patlaması (Pump/Dump olabilir)
+                - **≥2σ**: ⚠️ Ortalama üstü hacim
+                - **<2σ**: ✅ Normal hacim
+                """)
+            else:
+                st.warning("Hacim verisi yüklenemedi.")
+    
+    st.divider()
+    
+    # ==================== 🎯 KESKİN NİŞANCI MODÜLÜ ====================
+    with st.expander("🎯 Keskin Nişancı Modülü (Sniper Mode)", expanded=False):
+        st.caption("Kanal sapmaları, pump tespiti ve destek/direnç seviyeleri")
+        
+        sniper_tabs = st.tabs(["📐 Kanal Bükücü", "🚀 Pump Radarı", "⚡ Destek/Direnç"])
+        
+        # ===== KANAL BÜKÜCÜ TAB =====
+        with sniper_tabs[0]:
+            st.markdown("#### 📐 Kanal Bükücü (Channel Bender)")
+            st.caption("Fiyatın Bollinger kanalından sapma skoru")
+            
+            with st.spinner("Kanal analizi yapılıyor..."):
+                channel_data = calculate_channel_bender()
+            
+            if channel_data:
+                # Aşırı durumları öne çıkar
+                extremes = [c for c in channel_data if abs(c['DeviationScore']) > 1.0]
+                if extremes:
+                    for e in extremes:
+                        color = "red" if e['DeviationScore'] > 0 else "green"
+                        st.markdown(f":{color}[**{e['Coin']}**: {e['Status']} (Skor: {e['DeviationScore']:.2f})]")
+                
+                df_ch = pd.DataFrame(channel_data)
+                df_ch = df_ch.sort_values(by='DeviationScore', key=abs, ascending=False)
+                df_ch = df_ch[['Coin', 'Price', 'DeviationScore', 'Status', 'Zone']]
+                
+                st.dataframe(
+                    df_ch,
+                    column_config={
+                        "Coin": st.column_config.TextColumn("Coin", width="small"),
+                        "Price": st.column_config.NumberColumn("Fiyat", format="$%.2f"),
+                        "DeviationScore": st.column_config.NumberColumn("Sapma Skoru", format="%+.2f"),
+                        "Status": st.column_config.TextColumn("Durum", width="medium"),
+                        "Zone": st.column_config.TextColumn("Bölge", width="small")
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                st.markdown("""
+                **Yorumlama**:
+                - **> +1.0**: 🔴 Kanal üstüne taşmış (aşırı alım, dönüş beklentisi)
+                - **< -1.0**: 🟢 Kanal altına düşmüş (aşırı satım, tepki beklentisi)
+                - **-0.5 ile +0.5**: 🟡 Dengeli bölge
+                """)
+            else:
+                st.warning("Kanal verisi yüklenemedi.")
+        
+        # ===== PUMP RADARI TAB =====
+        with sniper_tabs[1]:
+            st.markdown("#### 🚀 Pump & Düzeltme Radarı")
+            st.caption("Son 1 saatte %5+ yükselen coinler ve Fibonacci seviyeleri")
+            
+            with st.spinner("Pump taraması yapılıyor..."):
+                pump_data = detect_pump_corrections()
+            
+            if pump_data:
+                st.success(f"🚨 **{len(pump_data)} coin pump yapıyor!**")
+                
+                for coin in pump_data:
+                    st.markdown(f"""
+                    <div style="background: #2a2a2a; border-left: 3px solid #FF9800; padding: 15px; margin: 10px 0; border-radius: 5px;">
+                        <h4 style="margin: 0; color: #FF9800;">🚀 {coin['Coin']} (+{coin['Change1H']:.1f}%)</h4>
+                        <p style="margin: 5px 0; color: #fff;">Fiyat: <strong>${coin['Price']:,.2f}</strong></p>
+                        <p style="margin: 5px 0; color: #888;">24H Range: ${coin['Low24H']:,.2f} - ${coin['High24H']:,.2f}</p>
+                        <hr style="border-color: #444;">
+                        <p style="margin: 5px 0; color: #00C853;">📍 Fib 0.382 (Destek 1): <strong>${coin['Fib382']:,.2f}</strong></p>
+                        <p style="margin: 5px 0; color: #FFD700;">📍 Fib 0.500 (Orta): <strong>${coin['Fib500']:,.2f}</strong></p>
+                        <p style="margin: 5px 0; color: #00C853;">📍 Fib 0.618 (Altın Oran): <strong>${coin['Fib618']:,.2f}</strong></p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                st.markdown("""
+                **Strateji**: Pump sonrası düzeltmede Fib 0.618 seviyesi güçlü destek olabilir.
+                """)
+            else:
+                st.info("🔍 Son 1 saatte %5+ yükseliş gösteren coin yok.")
+        
+        # ===== DESTEK/DİRENÇ TAB =====
+        with sniper_tabs[2]:
+            st.markdown("#### ⚡ Otomatik Destek & Direnç")
+            st.caption("Local Min/Max noktalarından hesaplanmış seviyeler")
+            
+            with st.spinner("Seviyeler hesaplanıyor..."):
+                sr_data = calculate_support_resistance()
+            
+            if sr_data:
+                df_sr = pd.DataFrame(sr_data)
+                
+                # Konum yazısı oluştur
+                def get_position_text(pct):
+                    if pct > 70: return f"Dirence Yakın ({pct:.0f}%)"
+                    elif pct < 30: return f"Desteğe Yakın ({pct:.0f}%)"
+                    return f"Ortada ({pct:.0f}%)"
+                
+                df_sr['Konum'] = df_sr['PositionPct'].apply(get_position_text)
+                df_sr = df_sr[['Coin', 'Support', 'Price', 'Resistance', 'Konum']]
+                
+                st.dataframe(
+                    df_sr,
+                    column_config={
+                        "Coin": st.column_config.TextColumn("Coin", width="small"),
+                        "Support": st.column_config.NumberColumn("Destek", format="$%.2f"),
+                        "Price": st.column_config.NumberColumn("Fiyat", format="$%.2f"),
+                        "Resistance": st.column_config.NumberColumn("Direnç", format="$%.2f"),
+                        "Konum": st.column_config.TextColumn("Konum (%)", width="medium")
+                    },
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                st.markdown("""
+                **Okuma**: Fiyat desteğe yakınsa alım fırsatı, dirence yakınsa satış baskısı beklenebilir.
+                """)
+            else:
+                st.warning("Destek/Direnç verisi yüklenemedi.")
+    
+    st.divider()
+    
     # Kripto Özet
     st.subheader("🪙 Kripto Piyasası")
     cols = st.columns(4)
@@ -1886,6 +3352,119 @@ def render_dashboard():
         
         **Özet**: Düşük DXY + Düşük VIX + Düşük faiz = **Risk-on ortam (kripto için iyi)**
         """)
+    
+    st.divider()
+    
+    # ==================== ⚡ ALTCOIN GÜÇ ENDEKSİ (BINANCE) ====================
+    st.markdown("### ⚡ Altcoin Güç Endeksi")
+    
+    with st.spinner("Binance'den altcoin verileri alınıyor..."):
+        altpower_score, btc_change = calculate_altpower_score()
+    
+    # Renk ve mesaj belirleme
+    if altpower_score >= 60:
+        bar_color = "#00C853"
+        message = "🔥 ALTCOIN RALLİSİ: Altcoinler BTC'den daha güçlü!"
+    elif altpower_score <= 30:
+        bar_color = "#FF1744"
+        message = "🛡️ BTC DOMİNASYONU: Altcoinler eziliyor."
+    else:
+        bar_color = "#FF9800"
+        message = "⚖️ DENGELİ PİYASA"
+    
+    # Progress bar ve metrikler
+    st.progress(altpower_score / 100)
+    
+    cols = st.columns([2, 1, 1])
+    with cols[0]:
+        st.markdown(f"""
+        <div style="text-align: center; padding: 10px; background: {bar_color}22; border-radius: 10px; border: 2px solid {bar_color};">
+            <span style="color: {bar_color}; font-size: 1.3rem; font-weight: bold;">{message}</span>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with cols[1]:
+        st.metric(
+            label="AltPower Skoru",
+            value=f"{altpower_score:.0f}%",
+            delta=f"{int(altpower_score/5)}/20 BTC'yi Geçti"
+        )
+    
+    with cols[2]:
+        st.metric(
+            label="BTC 24H",
+            value=f"{btc_change:+.2f}%",
+            delta="Referans"
+        )
+    
+    with st.expander("💡 Altcoin Güç Endeksi Nedir?"):
+        st.markdown("""
+        **AltPower Skoru**, piyasadaki 20 majör altcoinden kaçının son 24 saatte Bitcoin'den daha iyi performans gösterdiğini ölçer.
+        
+        | Skor | Durum | Anlam |
+        |------|-------|-------|
+        | ≥60% | 🔥 Altcoin Rallisi | Altcoinler BTC'den güçlü, altseason sinyali |
+        | ≤30% | 🛡️ BTC Dominasyonu | Para BTC'ye akıyor, altcoinler zayıf |
+        | 30-60% | ⚖️ Dengeli | Karışık piyasa, seçici olmak gerek |
+        
+        **Kaynak**: Binance (20 majör altcoin: ETH, BNB, SOL, XRP, ADA, DOGE, AVAX, TRX, DOT, MATIC, LTC, LINK, UNI, ATOM, ETC, FIL, NEAR, AAVE, QNT, ALGO)
+        """)
+    
+    st.divider()
+    
+    # ==================== NAKİT AKIŞ TABLOSU ====================
+    st.subheader("💸 Nakit Akışı Tablosu (Son 1 Saat)")
+    
+    with st.spinner("Hacim verileri yükleniyor..."):
+        inout_data = calculate_inout_flow()
+    
+    if inout_data:
+        df_flow = pd.DataFrame(inout_data)
+        
+        # Görüntüleme için sütunları formatla
+        df_display = df_flow[['symbol', 'flow_pct', 'flow_type']].copy()
+        df_display.columns = ['Coin', 'Akış %', 'Yön']
+        df_display['Akış %'] = df_display['Akış %'].apply(lambda x: f"{x:+.1f}%")
+        
+        # Tablo stillemesi için renkli satırlar
+        def highlight_flow(row):
+            if row['Yön'] == 'BUY':
+                return ['background-color: rgba(0, 200, 83, 0.2)'] * len(row)
+            elif row['Yön'] == 'SELL':
+                return ['background-color: rgba(255, 23, 68, 0.2)'] * len(row)
+            return [''] * len(row)
+        
+        styled_df = df_display.style.apply(highlight_flow, axis=1)
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+    else:
+        st.warning("Nakit akış verisi yüklenemedi.")
+    
+    st.divider()
+    
+    # ==================== TRENDSTRING ANALİZİ ====================
+    st.subheader("📊 TrendString Analizi (4H)")
+    
+    trend_cols = st.columns(2)
+    
+    with trend_cols[0]:
+        btc_trend = calculate_trendstring('BTC/USDT')
+        st.markdown(f"""
+        <div style="text-align: center; padding: 15px; background: #1e1e1e; border-radius: 10px;">
+            <h3 style="color: #FF9800; margin: 0;">₿ Bitcoin</h3>
+            <p style="font-size: 2rem; margin: 10px 0; letter-spacing: 5px;">{btc_trend['visual']}</p>
+            <p style="color: #888; margin: 0;">{btc_trend['trendstring']} ({btc_trend['bullish_count']}/5 Yükseliş)</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with trend_cols[1]:
+        eth_trend = calculate_trendstring('ETH/USDT')
+        st.markdown(f"""
+        <div style="text-align: center; padding: 15px; background: #1e1e1e; border-radius: 10px;">
+            <h3 style="color: #627EEA; margin: 0;">Ξ Ethereum</h3>
+            <p style="font-size: 2rem; margin: 10px 0; letter-spacing: 5px;">{eth_trend['visual']}</p>
+            <p style="color: #888; margin: 0;">{eth_trend['trendstring']} ({eth_trend['bullish_count']}/5 Yükseliş)</p>
+        </div>
+        """, unsafe_allow_html=True)
 
 
 def render_crypto_page():
@@ -3207,9 +4786,9 @@ def render_ai_page():
                     'borderwidth': 2,
                     'bordercolor': "#333",
                     'steps': [
-                        {'range': [0, 40], 'color': '#FF174422'},
-                        {'range': [40, 60], 'color': '#FF980022'},
-                        {'range': [60, 100], 'color': '#00C85322'}
+                        {'range': [0, 40], 'color': 'rgba(255, 23, 68, 0.13)'},
+                        {'range': [40, 60], 'color': 'rgba(255, 152, 0, 0.13)'},
+                        {'range': [60, 100], 'color': 'rgba(0, 200, 83, 0.13)'}
                     ],
                     'threshold': {
                         'line': {'color': "white", 'width': 4},
