@@ -10,11 +10,39 @@ modüler, yüksek performanslı Streamlit terminali.
 - Kripto + Hisse Senedi Terminalleri
 """
 
+# ==================== IMPORTS ====================
+# Core
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-import requests
+import numpy as np
+import time
 from datetime import datetime, timedelta
+
+# Visualization
+import plotly.graph_objects as go
+import plotly.express as px
+
+# Data Sources
+import requests
+import ccxt
+import yfinance as yf
+
+# Machine Learning
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score
+from xgboost import XGBClassifier
+
+# Technical Analysis
+from scipy.signal import argrelextrema
+
+# Blockchain (optional - wrapped in try-except in functions)
+try:
+    from web3 import Web3
+    WEB3_AVAILABLE = True
+except ImportError:
+    WEB3_AVAILABLE = False
+
 
 # ==================== SAYFA KONFİGÜRASYONU ====================
 
@@ -95,7 +123,6 @@ def clean_dataframe(df, method='ffill_interpolate'):
     Returns:
         Temizlenmiş DataFrame
     """
-    import numpy as np
     
     df = df.copy()
     
@@ -127,8 +154,6 @@ def apply_median_filter(series, window: int = 5, threshold: float = 3.0):
     Returns:
         Filtrelenmiş Series
     """
-    import numpy as np
-    import pandas as pd
     
     series = series.copy()
     
@@ -158,7 +183,6 @@ def merge_time_series(dfs: list, how: str = 'outer', fill_method: str = 'ffill_i
     Returns:
         Birleştirilmiş DataFrame
     """
-    import pandas as pd
     
     if not dfs:
         return pd.DataFrame()
@@ -183,7 +207,6 @@ def merge_time_series(dfs: list, how: str = 'outer', fill_method: str = 'ffill_i
 
 def get_exchange_instance(config):
     """Borsa instance'ı oluşturur."""
-    import ccxt
     exchange_class = getattr(ccxt, config['class'])
     return exchange_class(config['options'])
 
@@ -191,7 +214,6 @@ def get_exchange_instance(config):
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_crypto_ticker(symbol: str):
     """Kripto fiyat bilgisi (fallback mekanizması)."""
-    import ccxt
     errors = []
     
     for config in EXCHANGE_CONFIGS:
@@ -209,7 +231,6 @@ def fetch_crypto_ticker(symbol: str):
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_crypto_ohlcv(symbol: str, timeframe: str, limit: int = 200):
     """Kripto OHLCV verisi + EMA hesaplama."""
-    import ccxt
     errors = []
     
     for config in EXCHANGE_CONFIGS:
@@ -246,7 +267,6 @@ def calculate_altpower_score():
         - altpower_score: 0-100 arası skor (BTC'yi geçen altcoin %)
         - btc_change: BTC'nin 24H değişimi
     """
-    import ccxt
     
     ALTCOINS = [
         'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT',
@@ -293,8 +313,6 @@ def calculate_altpower():
     Returns:
         dict: altpower_score (0-100), positive_count, total_count, details (top 10)
     """
-    import ccxt
-    import time
     
     try:
         exchange = ccxt.kucoin({'enableRateLimit': True})
@@ -345,8 +363,6 @@ def calculate_inout_flow():
     Returns:
         list: Her coin için symbol, buy_volume, sell_volume, net_flow, flow_pct, flow_type
     """
-    import ccxt
-    import time
     
     MAJOR_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT',
                    'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
@@ -411,7 +427,6 @@ def calculate_trendstring(symbol: str = 'BTC/USDT'):
     Returns:
         dict: trendstring (+/-), visual (emoji), bullish_count
     """
-    import ccxt
     
     try:
         exchange = ccxt.kucoin({'enableRateLimit': True})
@@ -454,8 +469,6 @@ def fetch_market_radar_data():
     Returns:
         list: Her coin için radar verisi (symbol, price, trend, inout, change)
     """
-    import ccxt
-    import time
     
     TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
                  'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
@@ -563,8 +576,6 @@ def calculate_squeeze_volatility():
     Returns:
         list: Her coin için sıkışma durumu
     """
-    import ccxt
-    import numpy as np
     
     TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
                  'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
@@ -632,8 +643,6 @@ def fetch_correlation_matrix():
     Returns:
         tuple: (correlation_matrix, coin_list)
     """
-    import yfinance as yf
-    import numpy as np
     
     COINS = ['BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD', 'BNB-USD',
              'ADA-USD', 'DOGE-USD', 'AVAX-USD', 'DOT-USD', 'MATIC-USD']
@@ -679,8 +688,6 @@ def calculate_smart_scores():
     Returns:
         list: Her coin için Smart Score (0-100)
     """
-    import ccxt
-    import numpy as np
     
     TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
                  'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
@@ -811,8 +818,6 @@ def fetch_funding_rates():
     Returns:
         list: Her coin için sentiment verisi
     """
-    import ccxt
-    import numpy as np
     
     TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
                  'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
@@ -885,7 +890,6 @@ def calculate_orderbook_imbalance():
     Returns:
         list: Her coin için imbalance verisi
     """
-    import ccxt
     
     TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
                  'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
@@ -949,8 +953,6 @@ def detect_volume_anomalies():
     Returns:
         list: Her coin için anomali verisi
     """
-    import ccxt
-    import numpy as np
     
     TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
                  'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
@@ -1030,8 +1032,6 @@ def calculate_channel_bender():
     Returns:
         list: Her coin için sapma skoru
     """
-    import ccxt
-    import numpy as np
     
     TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
                  'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
@@ -1116,7 +1116,6 @@ def detect_pump_corrections():
     Returns:
         list: Pumped coinler ve Fibonacci seviyeleri
     """
-    import ccxt
     
     TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
                  'ADA/USDT', 'DOGE/USDT', 'AVAX/USDT', 'DOT/USDT', 'POL/USDT']
@@ -1187,8 +1186,6 @@ def calculate_support_resistance():
     Returns:
         list: Her coin için destek ve direnç seviyeleri
     """
-    import ccxt
-    import numpy as np
     from scipy.signal import argrelextrema
     
     TOP_COINS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'BNB/USDT',
@@ -1259,12 +1256,10 @@ def calculate_support_resistance():
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_stock_data(symbol: str, period: str = "6mo"):
     """Yahoo Finance'den hisse verisi."""
-    import time
     max_retries = 3
     
     for attempt in range(max_retries):
         try:
-            import yfinance as yf
             ticker = yf.Ticker(symbol)
             hist = ticker.history(period=period)
             
@@ -1350,7 +1345,6 @@ def fetch_ethereum_data():
 @st.cache_data(ttl=21600, show_spinner=False)  # 6 saat cache
 def fetch_macro_data():
     """Genişletilmiş makro ekonomi verileri."""
-    import yfinance as yf
     
     symbols = {
         'DXY': 'DX-Y.NYB',      # Dolar Endeksi
@@ -1403,7 +1397,6 @@ def fetch_macro_data():
 @st.cache_data(ttl=21600, show_spinner=False)  # 6 saat cache
 def fetch_yield_curve_data():
     """Getiri eğrisi verisi (10Y-2Y spread)."""
-    import yfinance as yf
     
     try:
         # 10 Yıllık ve 2 Yıllık tahvil getirisi
@@ -1459,7 +1452,6 @@ def fetch_liquidity_proxy():
     Alternatif olarak TLT (uzun vadeli tahvil ETF) ve M2V kullanıyoruz.
     TLT yükselirse → faizler düşüyor → likidite artıyor
     """
-    import yfinance as yf
     
     try:
         # TLT: iShares 20+ Year Treasury Bond ETF
@@ -1518,8 +1510,6 @@ def fetch_credit_and_liquidity_data():
     - HG=F: Copper futures
     - GC=F: Gold futures
     """
-    import yfinance as yf
-    import numpy as np
     
     try:
         # ETF ve emtia verileri
@@ -1632,8 +1622,6 @@ def fetch_rolling_correlations(window: int = 30):
     BTC ile diğer varlıklar arasındaki hareketli korelasyon.
     BTC 'teknoloji hissesi' mi yoksa 'dijital altın' mı gibi davranıyor?
     """
-    import yfinance as yf
-    import numpy as np
     
     try:
         btc = yf.Ticker('BTC-USD')
@@ -1758,8 +1746,6 @@ def prepare_master_features(macro_data, liquidity_data, yield_data, credit_data,
     Tüm makro ve sentiment verilerini birleştirir.
     NaN değerlerini forward-fill ile doldurur.
     """
-    import pandas as pd
-    import numpy as np
     
     features = {}
     
@@ -1822,8 +1808,6 @@ def fetch_geopolitical_trade_data():
     - BDI Proxy: BDRY ETF (Breakwave Dry Bulk Shipping)
     - Bank Stress: KBE (Bank ETF) / TLT oranı
     """
-    import yfinance as yf
-    import numpy as np
     
     try:
         results = {}
@@ -2004,7 +1988,6 @@ def prepare_master_features_final(base_features: dict, geo_data: dict = None) ->
     XGBoost için final feature matrix.
     Tüm verileri birleştirir ve NaN temizliği yapar.
     """
-    import numpy as np
     
     features = base_features.copy() if base_features else {}
     
@@ -2095,7 +2078,6 @@ def fetch_market_sentiment():
     Piyasa duyarlılık göstergeleri.
     VIX ve SKEW kullanarak piyasa stresini ölçer.
     """
-    import yfinance as yf
     
     try:
         vix = yf.Ticker('^VIX')
@@ -2413,8 +2395,6 @@ def calculate_risk_score(macro_data: dict, liquidity_data: dict = None, yield_da
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_correlation_heatmap_data(days: int = 30):
     """Varlıklar arası korelasyon matrisi için veri çeker."""
-    import yfinance as yf
-    import numpy as np
     
     assets = {
         'BTC': 'BTC-USD',
@@ -2447,7 +2427,6 @@ def fetch_correlation_heatmap_data(days: int = 30):
             return None, "Yeterli veri yok"
         
         # DataFrame oluştur
-        import pandas as pd
         df = pd.DataFrame(returns_data)
         
         # Korelasyon matrisi
@@ -2461,8 +2440,6 @@ def fetch_correlation_heatmap_data(days: int = 30):
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_correlation_data(crypto_symbol: str = "BTC-USD", days: int = 90):
     """DXY ve Kripto arasındaki korelasyonu hesaplar."""
-    import yfinance as yf
-    import numpy as np
     
     try:
         dxy = yf.Ticker('DX-Y.NYB')
@@ -2975,7 +2952,6 @@ def render_dashboard():
                 corr_matrix, coins = fetch_correlation_matrix()
             
             if corr_matrix is not None and len(coins) > 0:
-                import plotly.express as px
                 
                 fig = px.imshow(
                     corr_matrix,
@@ -3935,7 +3911,6 @@ def render_macro_page():
         with fng_cols[1]:
             # Fear & Greed grafiği
             if fng_data.get('history'):
-                import pandas as pd
                 fng_df = pd.DataFrame(fng_data['history'])
                 fng_df['date'] = pd.to_datetime(fng_df['date'].astype(int), unit='s')
                 
@@ -4103,7 +4078,6 @@ def render_macro_page():
         corr_matrix, corr_error = fetch_correlation_heatmap_data(30)
     
     if corr_matrix is not None:
-        import plotly.express as px
         
         fig = px.imshow(
             corr_matrix,
@@ -4220,7 +4194,6 @@ def render_macro_page():
         
         # Spread geçmişi grafiği
         if yield_data.get('history'):
-            import pandas as pd
             spread_df = pd.DataFrame(yield_data['history'])
             
             fig = go.Figure()
@@ -4500,9 +4473,6 @@ def render_ai_page():
     
     with st.spinner("Veri hazırlanıyor..."):
         try:
-            import yfinance as yf
-            import numpy as np
-            import pandas as pd
             
             # BTC verisini çek
             btc = yf.Ticker('BTC-USD')
@@ -4641,7 +4611,6 @@ def render_ai_page():
                 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
                 from sklearn.preprocessing import StandardScaler
                 from sklearn.metrics import accuracy_score
-                import numpy as np
                 
                 # Feature ve target ayır
                 X = df[feature_cols].astype('float32')
@@ -4896,7 +4865,6 @@ def run_backtest(predictions, prices, fee: float = 0.001) -> dict:
     Returns:
         dict: Backtest sonuçları
     """
-    import numpy as np
     
     # Array'leri aynı boyuta getir
     min_len = min(len(predictions), len(prices))
@@ -4986,7 +4954,6 @@ def run_backtest(predictions, prices, fee: float = 0.001) -> dict:
 @st.cache_data(ttl=86400, show_spinner=False)  # 1 günlük cache
 def fetch_backtest_data(symbol: str = 'BTC-USD', period: str = '2y'):
     """Backtest için tarihsel veri çeker."""
-    import yfinance as yf
     
     try:
         ticker = yf.Ticker(symbol)
@@ -5038,8 +5005,6 @@ def render_backtest_page():
             return
         
         try:
-            import numpy as np
-            import pandas as pd
             
             # Feature Engineering (AI sayfasıyla aynı)
             df = hist[['Close', 'Volume', 'High', 'Low']].copy()
