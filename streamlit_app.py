@@ -257,6 +257,467 @@ def fetch_crypto_ohlcv(symbol: str, timeframe: str, limit: int = 200):
     return None, " | ".join(errors), None
 
 
+# ==================== ÇOK FAKTÖRLÜ KARAR DESTEK SİSTEMİ (MFDS) ====================
+
+@st.cache_data(ttl=300, show_spinner=False)
+def collect_market_signals(symbol: str = "BTC/USDT"):
+    """
+    Holistik Veri Toplama - 4 Ana Kategoride Sinyal Toplama.
+    Tüm değerler 0-1 arasında normalize edilir.
+    
+    Returns:
+        dict: signals, raw_values, errors
+    """
+    signals = {}
+    raw_values = {}
+    errors = []
+    
+    # ========== A. TEKNİK SENSÖRLER ==========
+    try:
+        # TrendString Skoru (son 5 mum)
+        trend_data = calculate_trendstring(symbol)
+        bullish_count = trend_data.get('bullish_count', 0)
+        signals['trendstring'] = bullish_count / 5.0  # 0-1 arası
+        raw_values['trendstring'] = trend_data.get('trendstring', '?????')
+    except Exception as e:
+        signals['trendstring'] = 0.5  # Nötr
+        errors.append(f"TrendString: {str(e)}")
+    
+    try:
+        # SVI (Sıkışma - Bollinger Bandwidth)
+        squeeze_data = calculate_squeeze_volatility()
+        btc_squeeze = next((s for s in squeeze_data if s['Coin'] == symbol.split('/')[0]), None)
+        if btc_squeeze:
+            bandwidth = btc_squeeze.get('Bandwidth', 5)
+            # Düşük bandwidth = yüksek potansiyel
+            signals['svi'] = max(0, min(1, (10 - bandwidth) / 10))
+            raw_values['svi_bandwidth'] = bandwidth
+            raw_values['svi_alert'] = btc_squeeze.get('SqueezeAlert', False)
+        else:
+            signals['svi'] = 0.5
+            raw_values['svi_bandwidth'] = 5
+    except Exception as e:
+        signals['svi'] = 0.5
+        errors.append(f"SVI: {str(e)}")
+    
+    try:
+        # RSI (14 periyot)
+        ohlcv, _, _ = fetch_crypto_ohlcv(symbol, '4h', 50)
+        if ohlcv is not None and len(ohlcv) >= 14:
+            closes = ohlcv['close'].values
+            delta = np.diff(closes)
+            gains = np.where(delta > 0, delta, 0)
+            losses = np.where(delta < 0, -delta, 0)
+            avg_gain = np.mean(gains[-14:])
+            avg_loss = np.mean(losses[-14:])
+            if avg_loss > 0:
+                rs = avg_gain / avg_loss
+                rsi = 100 - (100 / (1 + rs))
+            else:
+                rsi = 100
+            
+            # RSI -> Sinyal dönüşümü
+            # 30 altı = aşırı satım (pozitif), 70 üstü = aşırı alım (negatif)
+            if rsi < 30:
+                signals['rsi'] = 0.8 + (30 - rsi) / 150  # 0.8-1.0
+            elif rsi > 70:
+                signals['rsi'] = 0.2 - (rsi - 70) / 150  # 0.0-0.2
+            else:
+                signals['rsi'] = 0.3 + (rsi - 30) * 0.01  # 0.3-0.7
+            signals['rsi'] = max(0, min(1, signals['rsi']))
+            raw_values['rsi'] = rsi
+        else:
+            signals['rsi'] = 0.5
+            raw_values['rsi'] = 50
+    except Exception as e:
+        signals['rsi'] = 0.5
+        raw_values['rsi'] = 50
+        errors.append(f"RSI: {str(e)}")
+    
+    # ========== B. PİYASA REJİMİ ==========
+    try:
+        # AltPower
+        altpower, _ = calculate_altpower_score()
+        signals['altpower'] = altpower / 100.0  # 0-1 arası
+        raw_values['altpower'] = altpower
+    except Exception as e:
+        signals['altpower'] = 0.5
+        raw_values['altpower'] = 50
+        errors.append(f"AltPower: {str(e)}")
+    
+    try:
+        # Funding Rate Proxy (momentum bazlı)
+        funding_data = fetch_funding_rates()
+        btc_funding = next((f for f in funding_data if f['Coin'] == symbol.split('/')[0]), None)
+        if btc_funding:
+            funding_rate = btc_funding.get('FundingRate', 0)
+            # Negatif funding = short squeeze potansiyeli (pozitif)
+            if funding_rate < -0.01:
+                signals['funding'] = 0.8
+            elif funding_rate > 0.01:
+                signals['funding'] = 0.2
+            else:
+                signals['funding'] = 0.5
+            raw_values['funding_rate'] = funding_rate
+        else:
+            signals['funding'] = 0.5
+            raw_values['funding_rate'] = 0
+    except Exception as e:
+        signals['funding'] = 0.5
+        raw_values['funding_rate'] = 0
+        errors.append(f"Funding: {str(e)}")
+    
+    # ========== C. MAKRO ORTAM ==========
+    try:
+        macro_data = fetch_macro_data()
+        
+        # DXY
+        if macro_data.get('DXY'):
+            dxy_val = macro_data['DXY']['value']
+            if dxy_val > 105:
+                signals['dxy'] = 0.0  # Negatif
+            elif dxy_val < 100:
+                signals['dxy'] = 1.0  # Pozitif
+            else:
+                signals['dxy'] = 1 - (dxy_val - 100) / 5  # 0-1 arası
+            raw_values['dxy'] = dxy_val
+        else:
+            signals['dxy'] = 0.5
+            raw_values['dxy'] = 102.5
+        
+        # TNX (ABD 10Y Tahvil)
+        if macro_data.get('US10Y'):
+            tnx_val = macro_data['US10Y']['value']
+            if tnx_val > 4.5:
+                signals['tnx'] = 0.0  # Negatif
+            elif tnx_val < 3.5:
+                signals['tnx'] = 1.0  # Pozitif
+            else:
+                signals['tnx'] = 1 - (tnx_val - 3.5)  # 0-1 arası
+            raw_values['tnx'] = tnx_val
+        else:
+            signals['tnx'] = 0.5
+            raw_values['tnx'] = 4.0
+    except Exception as e:
+        signals['dxy'] = 0.5
+        signals['tnx'] = 0.5
+        raw_values['dxy'] = 102.5
+        raw_values['tnx'] = 4.0
+        errors.append(f"Makro: {str(e)}")
+    
+    # ========== D. TEMEL DEĞERLEME ==========
+    try:
+        # Bu kısım sadece DeFi protokolleri için geçerli
+        # Kripto için protocol_data yok, nötr kabul et
+        signals['mcap_tvl'] = 0.5  # Nötr
+        raw_values['mcap_tvl'] = None
+    except:
+        signals['mcap_tvl'] = 0.5
+        raw_values['mcap_tvl'] = None
+    
+    return {
+        'signals': signals,
+        'raw_values': raw_values,
+        'errors': errors,
+        'symbol': symbol
+    }
+
+
+def calculate_holistic_score(signal_data: dict) -> dict:
+    """
+    Ağırlıklı Mantık Motoru - Holistik Skor Hesaplama.
+    
+    Mühendislik Ağırlıkları:
+    - Teknik Baz: TrendString (0.25) + RSI (0.15) = 0.40
+    - Piyasa: AltPower (0.20) + Funding (0.10) = 0.30
+    - Makro: DXY (0.15) + TNX (0.10) = 0.25
+    - Temel: Mcap/TVL (0.05) = 0.05
+    
+    Returns:
+        dict: score (0-100), factors, explanation
+    """
+    signals = signal_data.get('signals', {})
+    raw_values = signal_data.get('raw_values', {})
+    
+    # Faktör hesaplama
+    factors = []
+    
+    # ===== BAZ PUAN (Teknik) =====
+    trendstring_contribution = signals.get('trendstring', 0.5) * 0.25 * 100
+    factors.append({
+        'name': 'TrendString',
+        'value': trendstring_contribution,
+        'raw': raw_values.get('trendstring', '?')
+    })
+    
+    rsi_contribution = signals.get('rsi', 0.5) * 0.15 * 100
+    factors.append({
+        'name': 'RSI',
+        'value': rsi_contribution,
+        'raw': f"{raw_values.get('rsi', 50):.0f}"
+    })
+    
+    # ===== MOMENTUM (Piyasa) =====
+    altpower_contribution = signals.get('altpower', 0.5) * 0.20 * 100
+    factors.append({
+        'name': 'AltPower',
+        'value': altpower_contribution,
+        'raw': f"{raw_values.get('altpower', 50):.0f}%"
+    })
+    
+    funding_contribution = signals.get('funding', 0.5) * 0.10 * 100
+    factors.append({
+        'name': 'Funding',
+        'value': funding_contribution,
+        'raw': f"{raw_values.get('funding_rate', 0):.4f}"
+    })
+    
+    # ===== MAKRO =====
+    dxy_contribution = signals.get('dxy', 0.5) * 0.15 * 100
+    factors.append({
+        'name': 'DXY',
+        'value': dxy_contribution,
+        'raw': f"{raw_values.get('dxy', 102.5):.1f}"
+    })
+    
+    tnx_contribution = signals.get('tnx', 0.5) * 0.10 * 100
+    factors.append({
+        'name': 'TNX (10Y)',
+        'value': tnx_contribution,
+        'raw': f"{raw_values.get('tnx', 4.0):.2f}%"
+    })
+    
+    # ===== TEMEL =====
+    mcap_tvl_contribution = signals.get('mcap_tvl', 0.5) * 0.05 * 100
+    factors.append({
+        'name': 'Mcap/TVL',
+        'value': mcap_tvl_contribution,
+        'raw': raw_values.get('mcap_tvl') or 'N/A'
+    })
+    
+    # Baz skor hesapla
+    base_score = sum(f['value'] for f in factors)
+    
+    # ===== VOLATİLİTE ÇARPANI =====
+    volatility_multiplier = 1.0
+    svi_bandwidth = raw_values.get('svi_bandwidth', 5)
+    svi_alert = raw_values.get('svi_alert', False)
+    
+    if svi_bandwidth < 5 and signals.get('trendstring', 0) > 0.6:
+        volatility_multiplier = 1.2
+        factors.append({
+            'name': '🔥 Sıkışma Çarpanı',
+            'value': base_score * 0.2,  # %20 bonus
+            'raw': f"BW={svi_bandwidth:.1f}%"
+        })
+    
+    # ===== MAKRO FRENİ =====
+    macro_penalty = 0
+    dxy_val = raw_values.get('dxy', 102.5)
+    tnx_val = raw_values.get('tnx', 4.0)
+    
+    if dxy_val > 105 or tnx_val > 4.4:
+        macro_penalty = -15
+        factors.append({
+            'name': '⚠️ Makro Freni',
+            'value': macro_penalty,
+            'raw': f"DXY={dxy_val:.1f}, TNX={tnx_val:.2f}"
+        })
+    
+    # ===== TEMEL BONUS =====
+    fundamental_bonus = 0
+    mcap_tvl_val = raw_values.get('mcap_tvl')
+    if mcap_tvl_val is not None and isinstance(mcap_tvl_val, (int, float)):
+        if mcap_tvl_val < 0.8:
+            fundamental_bonus = 10
+            factors.append({
+                'name': '✅ Değerleme Bonusu',
+                'value': fundamental_bonus,
+                'raw': f"Mcap/TVL={mcap_tvl_val:.2f}"
+            })
+    
+    # Final skor
+    final_score = (base_score * volatility_multiplier) + macro_penalty + fundamental_bonus
+    final_score = max(0, min(100, final_score))
+    
+    # Karar
+    if final_score >= 60:
+        decision = "GÜÇLÜ AL"
+        decision_color = "#00C853"
+        decision_emoji = "🟢"
+    elif final_score <= 40:
+        decision = "NAKİTTE KAL"
+        decision_color = "#FF1744"
+        decision_emoji = "🔴"
+    else:
+        decision = "BEKLE"
+        decision_color = "#FF9800"
+        decision_emoji = "🟡"
+    
+    # Session state'e kaydet
+    st.session_state['mfds_score'] = final_score
+    st.session_state['mfds_decision'] = decision
+    st.session_state['mfds_factors'] = factors
+    
+    return {
+        'score': final_score,
+        'probability': final_score / 100,
+        'decision': decision,
+        'decision_color': decision_color,
+        'decision_emoji': decision_emoji,
+        'factors': factors,
+        'base_score': base_score,
+        'volatility_multiplier': volatility_multiplier,
+        'macro_penalty': macro_penalty,
+        'fundamental_bonus': fundamental_bonus,
+        'signals': signals,
+        'raw_values': raw_values
+    }
+
+
+def render_waterfall_chart(holistic_result: dict):
+    """
+    Açıklanabilir AI - Şelale Grafiği.
+    Puanın nasıl oluştuğunu görselleştirir.
+    """
+    factors = holistic_result.get('factors', [])
+    
+    if not factors:
+        st.warning("Faktör verisi bulunamadı")
+        return
+    
+    # Waterfall için veri hazırla
+    measure = ['relative'] * len(factors)
+    measure.append('total')
+    
+    x_labels = [f['name'] for f in factors]
+    x_labels.append('Final Skor')
+    
+    y_values = [f['value'] for f in factors]
+    y_values.append(holistic_result['score'])
+    
+    # Renkler
+    colors = []
+    for f in factors:
+        if f['value'] > 0:
+            colors.append('#00C853')  # Yeşil
+        else:
+            colors.append('#FF1744')  # Kırmızı
+    colors.append('#2196F3')  # Final - Mavi
+    
+    fig = go.Figure(go.Waterfall(
+        name="Skor",
+        orientation="v",
+        measure=measure,
+        x=x_labels,
+        textposition="outside",
+        text=[f"+{v:.1f}" if v > 0 else f"{v:.1f}" for v in y_values[:-1]] + [f"{holistic_result['score']:.0f}"],
+        y=y_values,
+        connector={"line": {"color": "rgb(63, 63, 63)"}},
+        increasing={"marker": {"color": "#00C853"}},
+        decreasing={"marker": {"color": "#FF1744"}},
+        totals={"marker": {"color": "#2196F3"}}
+    ))
+    
+    fig.update_layout(
+        title="📊 Skor Oluşumu (XAI Waterfall)",
+        template="plotly_dark",
+        height=400,
+        showlegend=False,
+        margin=dict(l=20, r=20, t=60, b=20)
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# ==================== MFDS YARDIMCI FONKSİYONLARI ====================
+
+@st.cache_data(ttl=300, show_spinner=False)
+def calculate_trendstring(symbol: str = "BTC/USDT"):
+    """
+    Son 5 adet 4H mumun yönünü hesaplar.
+    + = Yükseliş, - = Düşüş
+    
+    Returns:
+        dict: trendstring, bullish_count, bearish_count
+    """
+    try:
+        ohlcv, _, _ = fetch_crypto_ohlcv(symbol, '4h', 10)
+        if ohlcv is None or len(ohlcv) < 5:
+            return {'trendstring': '?????', 'bullish_count': 0, 'bearish_count': 0}
+        
+        # Son 5 mum
+        last_5 = ohlcv.tail(5)
+        trend_chars = []
+        
+        for _, row in last_5.iterrows():
+            if row['close'] >= row['open']:
+                trend_chars.append('+')
+            else:
+                trend_chars.append('-')
+        
+        trendstring = ''.join(trend_chars)
+        bullish_count = trendstring.count('+')
+        bearish_count = trendstring.count('-')
+        
+        return {
+            'trendstring': trendstring,
+            'bullish_count': bullish_count,
+            'bearish_count': bearish_count
+        }
+    except Exception as e:
+        return {'trendstring': '?????', 'bullish_count': 0, 'bearish_count': 0, 'error': str(e)}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_funding_rates():
+    """
+    Funding rate proxy - momentum bazlı hesaplama.
+    Gerçek funding rate Türkiye'den erişilemediği için
+    kısa vadeli momentum kullanılır.
+    
+    Returns:
+        list: Coin bazlı momentum verileri
+    """
+    coins = ['BTC', 'ETH', 'SOL', 'XRP', 'BNB']
+    results = []
+    
+    for coin in coins:
+        try:
+            symbol = f"{coin}/USDT"
+            ohlcv, _, _ = fetch_crypto_ohlcv(symbol, '1h', 24)
+            
+            if ohlcv is not None and len(ohlcv) >= 24:
+                # Son 24 saatlik momentum
+                first_price = ohlcv['close'].iloc[0]
+                last_price = ohlcv['close'].iloc[-1]
+                momentum = (last_price - first_price) / first_price
+                
+                # Momentum'u funding rate proxy olarak kullan
+                # Pozitif momentum = long heavy = pozitif funding
+                funding_proxy = momentum * 0.1  # Scale down
+                
+                results.append({
+                    'Coin': coin,
+                    'FundingRate': funding_proxy,
+                    'Momentum24h': momentum * 100
+                })
+            else:
+                results.append({
+                    'Coin': coin,
+                    'FundingRate': 0,
+                    'Momentum24h': 0
+                })
+        except:
+            results.append({
+                'Coin': coin,
+                'FundingRate': 0,
+                'Momentum24h': 0
+            })
+    
+    return results
+
+
 # ==================== MIKABOT-STYLE ANALİZ MODÜLLER ====================
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1751,6 +2212,10 @@ def prepare_master_features(macro_data, liquidity_data, yield_data, credit_data,
     """
     
     features = {}
+    
+    # None kontrolü
+    if macro_data is None:
+        macro_data = {}
     
     # Makro veriler
     if macro_data:
@@ -3840,6 +4305,11 @@ def render_macro_page():
         correlation_data, corr_err = fetch_rolling_correlations(30)
         geo_data, geo_err = fetch_geopolitical_trade_data()
     
+    # None güvenlik kontrolü
+    if macro_data is None:
+        macro_data = {}
+        st.warning("⚠️ Makro veriler alınamadı")
+    
     # Master features hazırla (XGBoost için)
     base_features = prepare_master_features(macro_data, liquidity_data, yield_data, credit_data, fng_data, correlation_data)
     master_features = prepare_master_features_final(base_features, geo_data)
@@ -5314,87 +5784,100 @@ def calculate_kelly_fraction(win_rate: float, avg_win: float, avg_loss: float) -
 
 
 def render_kokpit():
-    """🏠 KOKPİT - Executive Dashboard"""
+    """🏠 KOKPİT - Executive Dashboard with MFDS Integration"""
     st.title("🏠 KOKPİT")
-    st.caption("Tek bakışta piyasa durumu ve yatırım kararı")
+    st.caption("Çok Faktörlü Karar Destek Sistemi (MFDS) ile Piyasa Değerlendirmesi")
     
-    # Karar Kutusu (mevcut Dashboard'dan)
-    ai_prob = None
-    risk_score = st.session_state.get('risk_score', 50)
-    market_regime = st.session_state.get('market_regime', 'KARIŞIK')
+    # MFDS Skor Hesaplama
+    with st.spinner("📊 Piyasa sinyalleri toplanıyor..."):
+        signal_data = collect_market_signals("BTC/USDT")
+        holistic_result = calculate_holistic_score(signal_data)
     
-    if 'xgb_model' in st.session_state and st.session_state.xgb_model is not None:
-        try:
-            last_row = st.session_state.xgb_last_row
-            proba = st.session_state.xgb_model.predict_proba(last_row)[0]
-            ai_prob = proba[1] * 100
-        except:
-            ai_prob = None
+    score = holistic_result['score']
+    decision = holistic_result['decision']
+    decision_color = holistic_result['decision_color']
+    decision_emoji = holistic_result['decision_emoji']
     
-    # Executive Summary Box
-    if ai_prob is not None and ai_prob > 55 and risk_score > 60:
-        st.markdown("""
+    # Executive Summary Box - MFDS Karar
+    if score >= 60:
+        st.markdown(f"""
         <div style="background: linear-gradient(135deg, rgba(0,200,83,0.13), rgba(0,200,83,0.27)); border: 3px solid #00C853; border-radius: 15px; padding: 25px; margin-bottom: 20px;">
-            <h2 style="color: #00C853; margin: 0; text-align: center;">✅ YATIRIM İÇİN UYGUN KOŞULLAR</h2>
-            <p style="color: #888; text-align: center; margin: 10px 0;">AI tahmini olumlu, makro riskler düşük.</p>
+            <h2 style="color: #00C853; margin: 0; text-align: center;">{decision_emoji} {decision}</h2>
+            <p style="color: #00C853; text-align: center; margin: 10px 0; font-size: 2.5rem; font-weight: bold;">{score:.0f}/100</p>
+            <p style="color: #888; text-align: center; margin: 5px 0;">Teknik sinyaller güçlü, makro ortam pozitif.</p>
         </div>
         """, unsafe_allow_html=True)
-    elif ai_prob is not None and ai_prob < 45 or risk_score < 40:
-        st.markdown("""
+    elif score <= 40:
+        st.markdown(f"""
         <div style="background: linear-gradient(135deg, rgba(255,23,68,0.13), rgba(255,23,68,0.27)); border: 3px solid #FF1744; border-radius: 15px; padding: 25px; margin-bottom: 20px;">
-            <h2 style="color: #FF1744; margin: 0; text-align: center;">⚠️ RİSK YÜKSEK - KORUNMA MODU</h2>
-            <p style="color: #888; text-align: center; margin: 10px 0;">Dikkatli olun, nakit/altın pozisyonu düşünün.</p>
+            <h2 style="color: #FF1744; margin: 0; text-align: center;">{decision_emoji} {decision}</h2>
+            <p style="color: #FF1744; text-align: center; margin: 10px 0; font-size: 2.5rem; font-weight: bold;">{score:.0f}/100</p>
+            <p style="color: #888; text-align: center; margin: 5px 0;">Nakit/altın pozisyonu, kaldıraçsız bekle.</p>
         </div>
         """, unsafe_allow_html=True)
     else:
-        st.markdown("""
+        st.markdown(f"""
         <div style="background: linear-gradient(135deg, rgba(255,152,0,0.13), rgba(255,152,0,0.27)); border: 3px solid #FF9800; border-radius: 15px; padding: 25px; margin-bottom: 20px;">
-            <h2 style="color: #FF9800; margin: 0; text-align: center;">🔄 KARIŞIK SİNYALLER</h2>
-            <p style="color: #888; text-align: center; margin: 10px 0;">Küçük pozisyonlar, stop-loss kullanın.</p>
+            <h2 style="color: #FF9800; margin: 0; text-align: center;">{decision_emoji} {decision}</h2>
+            <p style="color: #FF9800; text-align: center; margin: 10px 0; font-size: 2.5rem; font-weight: bold;">{score:.0f}/100</p>
+            <p style="color: #888; text-align: center; margin: 5px 0;">Küçük pozisyonlar, stop-loss kullanın.</p>
         </div>
         """, unsafe_allow_html=True)
+    
+    st.divider()
+    
+    # Faktör Özeti Tablosu
+    st.subheader("📋 Faktör Katkıları")
+    factors = holistic_result.get('factors', [])
+    if factors:
+        factor_df = pd.DataFrame([
+            {'Faktör': f['name'], 'Katkı': f"{f['value']:+.1f}", 'Ham Değer': str(f['raw'])}
+            for f in factors
+        ])
+        st.dataframe(factor_df, use_container_width=True, hide_index=True)
+    
+    # Hatalar varsa göster
+    if signal_data.get('errors'):
+        with st.expander("⚠️ Veri Uyarıları"):
+            for err in signal_data['errors']:
+                st.warning(err)
     
     st.divider()
     
     # 3 Kritik Metrik
-    st.subheader("📊 Kritik Metrikler")
-    cols = st.columns(3)
+    st.subheader("📊 Anlık Değerler")
+    cols = st.columns(4)
+    
+    raw_values = holistic_result.get('raw_values', {})
     
     with cols[0]:
-        if ai_prob is not None:
-            ai_color = "#00C853" if ai_prob > 55 else "#FF1744" if ai_prob < 45 else "#FF9800"
-            st.metric("🤖 AI Puanı", f"{ai_prob:.0f}%")
-        else:
-            st.metric("🤖 AI Puanı", "Model eğitilmedi")
-    
-    with cols[1]:
-        risk_color = "#00C853" if risk_score > 60 else "#FF1744" if risk_score < 40 else "#FF9800"
-        st.metric("🧭 Makro Risk", f"{risk_score:.0f}/100")
-    
-    with cols[2]:
         btc_data, _, _ = fetch_crypto_ticker("BTC/USDT")
         if btc_data:
             btc_price = btc_data.get('last', 0)
             btc_change = btc_data.get('percentage', 0)
-            st.metric("₿ BTC Fiyatı", f"${btc_price:,.0f}", f"{btc_change:+.2f}%")
+            st.metric("₿ BTC", f"${btc_price:,.0f}", f"{btc_change:+.2f}%")
         else:
-            st.metric("₿ BTC Fiyatı", "—")
+            st.metric("₿ BTC", "—")
+    
+    with cols[1]:
+        rsi_val = raw_values.get('rsi', 50)
+        rsi_delta = "Aşırı Satım" if rsi_val < 30 else "Aşırı Alım" if rsi_val > 70 else "Normal"
+        st.metric("📈 RSI", f"{rsi_val:.0f}", rsi_delta)
+    
+    with cols[2]:
+        dxy_val = raw_values.get('dxy', 102.5)
+        dxy_delta = "Risk ↑" if dxy_val > 105 else "Risk ↓" if dxy_val < 100 else "Normal"
+        st.metric("💵 DXY", f"{dxy_val:.1f}", dxy_delta)
+    
+    with cols[3]:
+        altpower = raw_values.get('altpower', 50)
+        st.metric("⚡ AltPower", f"{altpower:.0f}%")
     
     st.divider()
     
-    # AltPower Bar
-    st.subheader("⚡ Altcoin Güç Endeksi")
-    with st.spinner("Altcoin verileri yükleniyor..."):
-        altpower_score, btc_change = calculate_altpower_score()
-    
-    st.progress(altpower_score / 100)
-    
-    if altpower_score >= 60:
-        st.success(f"🔥 ALTCOIN RALLİSİ: {altpower_score:.0f}% altcoin BTC'den güçlü")
-    elif altpower_score <= 30:
-        st.error(f"🛡️ BTC DOMİNASYONU: Sadece {altpower_score:.0f}% altcoin BTC'yi geçiyor")
-    else:
-        st.warning(f"⚖️ DENGELİ: {altpower_score:.0f}% altcoin BTC'den iyi")
+    # Waterfall Chart (XAI)
+    st.subheader("📊 Skor Oluşumu (XAI)")
+    render_waterfall_chart(holistic_result)
 
 
 def render_piyasa_radari():
