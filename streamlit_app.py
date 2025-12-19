@@ -1,17 +1,18 @@
 """
-Profesyonel Finans Terminali v3.0 - Buffett Edition
-Warren Buffett'ın bilanço odaklı yatırım felsefesini kripto ve hisse piyasalarına entegre eden
+Profesyonel Finans Terminali v2.0
+Tüm modülleri (Mikabot, AI, Makro) tek profesyonel çatı altında toplayan
 modüler, yüksek performanslı Streamlit terminali.
 
 Özellikler:
-- On-Chain Bilanço Analizi (DeFiLlama API)
-- Buffett Finansal Sağlık Skoru (1-10)
-- EMA Teknik İndikatörleri (20, 50, 200)
-- Kripto + Hisse Senedi Terminalleri
+- 🏠 KOKPİT: Executive Summary, kritik metrikler
+- 📡 PİYASA RADARI: TrendString, InOut, SVI, Orderbook
+- 🧠 QUANT LAB: XGBoost, SHAP, FFT Döngü, Kelly
+- 🌍 MAKRO & TEMEL: DXY, Faizler, On-Chain, Sentiment
+- ⚙️ SİSTEM: Backtest, Ayarlar
 """
 
 # ==================== IMPORTS ====================
-# Core
+# Core Libraries
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -35,13 +36,15 @@ from xgboost import XGBClassifier
 
 # Technical Analysis
 from scipy.signal import argrelextrema
+from scipy.fft import fft, fftfreq  # FFT Döngü Analizi için
 
-# Blockchain (optional - wrapped in try-except in functions)
+# Blockchain (optional)
 try:
     from web3 import Web3
     WEB3_AVAILABLE = True
 except ImportError:
     WEB3_AVAILABLE = False
+
 
 
 # ==================== SAYFA KONFİGÜRASYONU ====================
@@ -211,7 +214,7 @@ def get_exchange_instance(config):
     return exchange_class(config['options'])
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)  # Fiyat verileri: 2 dakika
 def fetch_crypto_ticker(symbol: str):
     """Kripto fiyat bilgisi (fallback mekanizması)."""
     errors = []
@@ -228,7 +231,7 @@ def fetch_crypto_ticker(symbol: str):
     return None, " | ".join(errors), None
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)  # Fiyat verileri: 2 dakika
 def fetch_crypto_ohlcv(symbol: str, timeframe: str, limit: int = 200):
     """Kripto OHLCV verisi + EMA hesaplama."""
     errors = []
@@ -809,8 +812,8 @@ def calculate_smart_scores():
 
 # ==================== PİYASA DERİNLİĞİ VE DUYGU MODÜLLERİ ====================
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_funding_rates():
+@st.cache_data(ttl=3600, show_spinner=False)  # Makro veriler: 1 saat
+def fetch_liquidity_proxy():
     """
     Piyasa Sentiment Göstergesi - Fiyat momentumu bazlı.
     (Binance Futures Türkiye'den erişilemediği için alternatif yöntem)
@@ -1342,7 +1345,7 @@ def fetch_ethereum_data():
         return None, str(e)
 
 
-@st.cache_data(ttl=21600, show_spinner=False)  # 6 saat cache
+@st.cache_data(ttl=3600, show_spinner=False)  # Makro veriler: 1 saat
 def fetch_macro_data():
     """Genişletilmiş makro ekonomi verileri."""
     
@@ -1394,7 +1397,7 @@ def fetch_macro_data():
     return results
 
 
-@st.cache_data(ttl=21600, show_spinner=False)  # 6 saat cache
+@st.cache_data(ttl=3600, show_spinner=False)  # Makro veriler: 1 saat
 def fetch_yield_curve_data():
     """Getiri eğrisi verisi (10Y-2Y spread)."""
     
@@ -5243,27 +5246,390 @@ def render_backtest_page():
         st.warning("⚠️ Geçmiş performans gelecek sonuçları garanti etmez. Bu backtest simülasyonu yalnızca bilgilendirme amaçlıdır.")
 
 
+# ==================== V2.0 YENİ SAYFA FONKSİYONLARI ====================
+
+def calculate_fft_cycles(prices):
+    """FFT ile fiyat döngülerini tespit eder."""
+    try:
+        # Trend kaldır
+        x = np.arange(len(prices))
+        coeffs = np.polyfit(x, prices, 1)
+        trend = np.polyval(coeffs, x)
+        detrended = prices - trend
+        
+        # FFT hesapla
+        n = len(detrended)
+        yf = fft(detrended)
+        xf = fftfreq(n, 1)
+        
+        # Pozitif frekanslar ve güç
+        pos_mask = xf > 0
+        freqs = xf[pos_mask]
+        power = np.abs(yf[pos_mask])
+        
+        # Dominant period
+        if len(power) > 0:
+            dominant_idx = np.argmax(power)
+            dominant_period = 1 / freqs[dominant_idx] if freqs[dominant_idx] > 0 else 0
+        else:
+            dominant_period = 0
+        
+        # Top 5 döngü
+        top_indices = np.argsort(power)[-5:][::-1]
+        top_cycles = [(1/freqs[i] if freqs[i] > 0 else 0, power[i]) for i in top_indices if freqs[i] > 0]
+        
+        return {
+            'dominant_period': dominant_period,
+            'frequencies': freqs,
+            'power': power,
+            'top_cycles': top_cycles
+        }
+    except Exception as e:
+        return {'dominant_period': 0, 'frequencies': [], 'power': [], 'top_cycles': [], 'error': str(e)}
+
+
+def calculate_kelly_fraction(win_rate: float, avg_win: float, avg_loss: float) -> dict:
+    """Kelly Criterion ile optimal pozisyon boyutu."""
+    if avg_loss == 0 or win_rate == 0:
+        return {'kelly_full': 0, 'kelly_half': 0, 'recommendation': 'Yetersiz veri'}
+    
+    win_loss_ratio = avg_win / abs(avg_loss)
+    kelly_full = win_rate - ((1 - win_rate) / win_loss_ratio)
+    kelly_half = kelly_full / 2
+    
+    if kelly_full <= 0:
+        recommendation = "❌ Bu strateji ile yatırım yapılmamalı"
+    elif kelly_full < 0.1:
+        recommendation = "⚠️ Çok küçük pozisyon (<%10)"
+    elif kelly_full < 0.25:
+        recommendation = "✅ Makul pozisyon boyutu"
+    else:
+        recommendation = "🔥 Agresif (Half-Kelly önerilir)"
+    
+    return {
+        'kelly_full': max(0, kelly_full) * 100,
+        'kelly_half': max(0, kelly_half) * 100,
+        'recommendation': recommendation
+    }
+
+
+def render_kokpit():
+    """🏠 KOKPİT - Executive Dashboard"""
+    st.title("🏠 KOKPİT")
+    st.caption("Tek bakışta piyasa durumu ve yatırım kararı")
+    
+    # Karar Kutusu (mevcut Dashboard'dan)
+    ai_prob = None
+    risk_score = st.session_state.get('risk_score', 50)
+    market_regime = st.session_state.get('market_regime', 'KARIŞIK')
+    
+    if 'xgb_model' in st.session_state and st.session_state.xgb_model is not None:
+        try:
+            last_row = st.session_state.xgb_last_row
+            proba = st.session_state.xgb_model.predict_proba(last_row)[0]
+            ai_prob = proba[1] * 100
+        except:
+            ai_prob = None
+    
+    # Executive Summary Box
+    if ai_prob is not None and ai_prob > 55 and risk_score > 60:
+        st.markdown("""
+        <div style="background: linear-gradient(135deg, rgba(0,200,83,0.13), rgba(0,200,83,0.27)); border: 3px solid #00C853; border-radius: 15px; padding: 25px; margin-bottom: 20px;">
+            <h2 style="color: #00C853; margin: 0; text-align: center;">✅ YATIRIM İÇİN UYGUN KOŞULLAR</h2>
+            <p style="color: #888; text-align: center; margin: 10px 0;">AI tahmini olumlu, makro riskler düşük.</p>
+        </div>
+        """, unsafe_allow_html=True)
+    elif ai_prob is not None and ai_prob < 45 or risk_score < 40:
+        st.markdown("""
+        <div style="background: linear-gradient(135deg, rgba(255,23,68,0.13), rgba(255,23,68,0.27)); border: 3px solid #FF1744; border-radius: 15px; padding: 25px; margin-bottom: 20px;">
+            <h2 style="color: #FF1744; margin: 0; text-align: center;">⚠️ RİSK YÜKSEK - KORUNMA MODU</h2>
+            <p style="color: #888; text-align: center; margin: 10px 0;">Dikkatli olun, nakit/altın pozisyonu düşünün.</p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style="background: linear-gradient(135deg, rgba(255,152,0,0.13), rgba(255,152,0,0.27)); border: 3px solid #FF9800; border-radius: 15px; padding: 25px; margin-bottom: 20px;">
+            <h2 style="color: #FF9800; margin: 0; text-align: center;">🔄 KARIŞIK SİNYALLER</h2>
+            <p style="color: #888; text-align: center; margin: 10px 0;">Küçük pozisyonlar, stop-loss kullanın.</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.divider()
+    
+    # 3 Kritik Metrik
+    st.subheader("📊 Kritik Metrikler")
+    cols = st.columns(3)
+    
+    with cols[0]:
+        if ai_prob is not None:
+            ai_color = "#00C853" if ai_prob > 55 else "#FF1744" if ai_prob < 45 else "#FF9800"
+            st.metric("🤖 AI Puanı", f"{ai_prob:.0f}%")
+        else:
+            st.metric("🤖 AI Puanı", "Model eğitilmedi")
+    
+    with cols[1]:
+        risk_color = "#00C853" if risk_score > 60 else "#FF1744" if risk_score < 40 else "#FF9800"
+        st.metric("🧭 Makro Risk", f"{risk_score:.0f}/100")
+    
+    with cols[2]:
+        btc_data, _, _ = fetch_crypto_ticker("BTC/USDT")
+        if btc_data:
+            btc_price = btc_data.get('last', 0)
+            btc_change = btc_data.get('percentage', 0)
+            st.metric("₿ BTC Fiyatı", f"${btc_price:,.0f}", f"{btc_change:+.2f}%")
+        else:
+            st.metric("₿ BTC Fiyatı", "—")
+    
+    st.divider()
+    
+    # AltPower Bar
+    st.subheader("⚡ Altcoin Güç Endeksi")
+    with st.spinner("Altcoin verileri yükleniyor..."):
+        altpower_score, btc_change = calculate_altpower_score()
+    
+    st.progress(altpower_score / 100)
+    
+    if altpower_score >= 60:
+        st.success(f"🔥 ALTCOIN RALLİSİ: {altpower_score:.0f}% altcoin BTC'den güçlü")
+    elif altpower_score <= 30:
+        st.error(f"🛡️ BTC DOMİNASYONU: Sadece {altpower_score:.0f}% altcoin BTC'yi geçiyor")
+    else:
+        st.warning(f"⚖️ DENGELİ: {altpower_score:.0f}% altcoin BTC'den iyi")
+
+
+def render_piyasa_radari():
+    """📡 PİYASA RADARI - Tüm Mikabot Özellikleri"""
+    st.title("📡 PİYASA RADARI")
+    st.caption("Kripto piyasası anlık tarama ve analiz merkezi")
+    
+    tabs = st.tabs(["📊 TrendString", "💸 InOut Akış", "🔥 SVI Sıkışma", "📚 Orderbook", "📐 Channel Bender"])
+    
+    # TrendString Tab
+    with tabs[0]:
+        st.markdown("#### 📊 TrendString Tablosu")
+        st.caption("Top 10 coin için son 5 adet 4H mumun yönü")
+        
+        with st.spinner("Piyasa radarı yükleniyor..."):
+            radar_data = fetch_market_radar_data()
+        
+        if radar_data:
+            df_radar = pd.DataFrame(radar_data)
+            df_view = df_radar[['Coin', 'Fiyat', 'TrendString', 'InOut', '24s Değişim']].copy()
+            df_view.columns = ['Coin', 'Fiyat ($)', 'Trend (4H)', 'Nakit Akış', '24H (%)']
+            st.dataframe(df_view, use_container_width=True, hide_index=True)
+        else:
+            st.warning("Veri yüklenemedi")
+    
+    # InOut Tab
+    with tabs[1]:
+        st.markdown("#### 💸 Nakit Akışı (Son 1 Saat)")
+        with st.spinner("Hacim verileri yükleniyor..."):
+            inout_data = calculate_inout_flow()
+        
+        if inout_data:
+            df_flow = pd.DataFrame(inout_data)
+            st.dataframe(df_flow[['symbol', 'flow_pct', 'flow_type']], use_container_width=True, hide_index=True)
+        else:
+            st.warning("Veri yüklenemedi")
+    
+    # SVI Tab
+    with tabs[2]:
+        st.markdown("#### 🔥 Volatilite Sıkışması (Bollinger Bandwidth)")
+        with st.spinner("Sıkışma analizi..."):
+            squeeze_data = calculate_squeeze_volatility()
+        
+        if squeeze_data:
+            df_sq = pd.DataFrame(squeeze_data)
+            alerts = [s for s in squeeze_data if s['SqueezeAlert']]
+            if alerts:
+                st.warning(f"⚠️ {len(alerts)} coin sıkışma bölgesinde!")
+            st.dataframe(df_sq[['Coin', 'Bandwidth', 'SqueezeStatus']], use_container_width=True, hide_index=True)
+        else:
+            st.warning("Veri yüklenemedi")
+    
+    # Orderbook Tab
+    with tabs[3]:
+        st.markdown("#### 📚 Emir Defteri Dengesizliği")
+        with st.spinner("Orderbook verileri..."):
+            ob_data = calculate_orderbook_imbalance()
+        
+        if ob_data:
+            df_ob = pd.DataFrame(ob_data)
+            st.dataframe(df_ob[['Coin', 'Imbalance', 'Status']], use_container_width=True, hide_index=True)
+        else:
+            st.warning("Veri yüklenemedi")
+    
+    # Channel Bender Tab
+    with tabs[4]:
+        st.markdown("#### 📐 Kanal Bükücü (Bollinger Sapma)")
+        with st.spinner("Kanal analizi..."):
+            ch_data = calculate_channel_bender()
+        
+        if ch_data:
+            df_ch = pd.DataFrame(ch_data)
+            st.dataframe(df_ch[['Coin', 'Price', 'DeviationScore', 'Status']], use_container_width=True, hide_index=True)
+        else:
+            st.warning("Veri yüklenemedi")
+
+
+def render_quant_lab():
+    """🧠 QUANT LABORATUVARI - Gelişmiş Analiz"""
+    st.title("🧠 QUANT LABORATUVARI")
+    st.caption("Yapay zeka ve istatistiksel analiz merkezi")
+    
+    tabs = st.tabs(["🤖 XGBoost Tahmin", "📊 SHAP Analizi", "🌊 FFT Döngü", "🎰 Kelly Hesaplayıcı"])
+    
+    # XGBoost Tab - mevcut render_ai_page içeriği
+    with tabs[0]:
+        render_ai_page()
+    
+    # SHAP Tab
+    with tabs[1]:
+        st.markdown("#### 📊 SHAP Feature Importance")
+        if 'xgb_importance' in st.session_state:
+            importance_df = st.session_state.xgb_importance.head(10)
+            fig = px.bar(importance_df, x='importance', y='feature', orientation='h',
+                        color='importance', color_continuous_scale='Viridis')
+            fig.update_layout(template='plotly_dark', height=400, yaxis={'categoryorder': 'total ascending'})
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Önce XGBoost modelini eğitin.")
+    
+    # FFT Tab
+    with tabs[2]:
+        st.markdown("#### 🌊 FFT Döngü Analizi")
+        st.caption("Fiyat serisindeki dominant döngüleri tespit eder")
+        
+        with st.spinner("FFT hesaplanıyor..."):
+            try:
+                btc = yf.Ticker('BTC-USD')
+                btc_hist = btc.history(period='1y')
+                if not btc_hist.empty:
+                    prices = btc_hist['Close'].values
+                    fft_result = calculate_fft_cycles(prices)
+                    
+                    st.metric("⏰ Dominant Döngü", f"{fft_result['dominant_period']:.0f} gün")
+                    
+                    if fft_result.get('top_cycles'):
+                        st.markdown("**Top 5 Döngü:**")
+                        for i, (period, power) in enumerate(fft_result['top_cycles'][:5]):
+                            if period > 0:
+                                st.write(f"{i+1}. {period:.0f} gün (güç: {power:.0f})")
+                    
+                    # FFT grafiği
+                    if len(fft_result['frequencies']) > 0:
+                        fig = go.Figure()
+                        periods = 1 / fft_result['frequencies']
+                        mask = (periods > 5) & (periods < 200)
+                        fig.add_trace(go.Scatter(x=periods[mask], y=fft_result['power'][mask], mode='lines', fill='tozeroy'))
+                        fig.update_layout(template='plotly_dark', xaxis_title='Periyot (gün)', yaxis_title='Güç', height=300)
+                        st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("BTC verisi alınamadı")
+            except Exception as e:
+                st.error(f"FFT hatası: {str(e)}")
+    
+    # Kelly Tab
+    with tabs[3]:
+        st.markdown("#### 🎰 Kelly Criterion Hesaplayıcı")
+        st.caption("Optimal pozisyon boyutu hesaplama")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            win_rate = st.slider("Win Rate (%)", 0, 100, 55) / 100
+        with col2:
+            avg_win = st.number_input("Ortalama Kazanç (%)", value=3.0)
+        with col3:
+            avg_loss = st.number_input("Ortalama Kayıp (%)", value=2.0)
+        
+        if st.button("Hesapla"):
+            kelly = calculate_kelly_fraction(win_rate, avg_win, avg_loss)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Full Kelly", f"{kelly['kelly_full']:.1f}%")
+            with col2:
+                st.metric("Half Kelly (Önerilen)", f"{kelly['kelly_half']:.1f}%")
+            
+            st.info(kelly['recommendation'])
+
+
+def render_makro_temel():
+    """🌍 MAKRO & TEMEL - Ekonomi ve On-Chain"""
+    st.title("🌍 MAKRO & TEMEL ANALİZ")
+    st.caption("Küresel ekonomi ve blockchain temel verileri")
+    
+    tabs = st.tabs(["💵 DXY & Faizler", "⛓️ On-Chain (TVL)", "📰 Sentiment", "📈 Hisse Piyasası"])
+    
+    # DXY Tab - mevcut makro sayfasından
+    with tabs[0]:
+        render_macro_page()
+    
+    # On-Chain Tab
+    with tabs[1]:
+        render_onchain_page()
+    
+    # Sentiment Tab
+    with tabs[2]:
+        st.markdown("#### 📰 Piyasa Duyarlılığı")
+        with st.spinner("Sentiment verileri yükleniyor..."):
+            fng_data, _ = fetch_fear_greed_index()
+        
+        if fng_data:
+            fng_val = fng_data['value']
+            if fng_val < 25:
+                fng_color, fng_label = "#FF1744", "Extreme Fear"
+            elif fng_val < 45:
+                fng_color, fng_label = "#FF5722", "Fear"
+            elif fng_val < 55:
+                fng_color, fng_label = "#FF9800", "Neutral"
+            elif fng_val < 75:
+                fng_color, fng_label = "#8BC34A", "Greed"
+            else:
+                fng_color, fng_label = "#00C853", "Extreme Greed"
+            
+            st.metric("😱 Fear & Greed Index", f"{fng_val} - {fng_label}")
+            st.progress(fng_val / 100)
+        else:
+            st.warning("Sentiment verisi alınamadı")
+    
+    # Hisse Tab
+    with tabs[3]:
+        render_stock_page()
+
+
+def render_sistem():
+    """⚙️ SİSTEM - Backtest ve Ayarlar"""
+    st.title("⚙️ SİSTEM")
+    st.caption("Strateji testi ve uygulama ayarları")
+    
+    tabs = st.tabs(["📉 Backtest", "🔧 Ayarlar"])
+    
+    with tabs[0]:
+        render_backtest_page()
+    
+    with tabs[1]:
+        render_settings_page()
+
+
 def render_sidebar():
-    """Sidebar navigasyon"""
+    """Sidebar navigasyon - v2.0 Profesyonel Hiyerarşi"""
     st.sidebar.title("📊 Finans Terminali")
-    st.sidebar.caption("Buffett Edition v3.0 + AI")
+    st.sidebar.caption("v2.0 Profesyonel")
     st.sidebar.divider()
     
     pages = [
-        '🏠 Dashboard',
-        '🪙 Kripto Analiz',
-        '📈 Hisse Senedi',
-        '🔍 On-Chain Bilanço',
-        '📊 Makro Ekonomi',
-        '🤖 AI Tahmin',
-        '📉 Backtest',
-        '⚙️ Ayarlar'
+        '🏠 KOKPİT',
+        '📡 PİYASA RADARI',
+        '🧠 QUANT LABORATUVARI',
+        '🌍 MAKRO & TEMEL',
+        '⚙️ SİSTEM'
     ]
     
-    selected = st.sidebar.radio("Sayfa Seçin", pages, label_visibility="collapsed")
+    selected = st.sidebar.radio("Menü", pages, label_visibility="collapsed")
     
     st.sidebar.divider()
-    st.sidebar.caption("💡 Tüm veriler önbelleğe alınır")
+    st.sidebar.caption("💡 Veriler önbelleğe alınır")
     st.sidebar.caption(f"🕐 {datetime.now().strftime('%H:%M:%S')}")
     
     return selected
@@ -5272,30 +5638,25 @@ def render_sidebar():
 # ==================== ANA ROUTER ====================
 
 def main():
-    """Ana uygulama"""
+    """Ana uygulama - v2.0 Router"""
     selected_page = render_sidebar()
     
-    if selected_page == '🏠 Dashboard':
-        render_dashboard()
-    elif selected_page == '🪙 Kripto Analiz':
-        render_crypto_page()
-    elif selected_page == '📈 Hisse Senedi':
-        render_stock_page()
-    elif selected_page == '🔍 On-Chain Bilanço':
-        render_onchain_page()
-    elif selected_page == '📊 Makro Ekonomi':
-        render_macro_page()
-    elif selected_page == '🤖 AI Tahmin':
-        render_ai_page()
-    elif selected_page == '📉 Backtest':
-        render_backtest_page()
-    elif selected_page == '⚙️ Ayarlar':
-        render_settings_page()
+    if selected_page == '🏠 KOKPİT':
+        render_kokpit()
+    elif selected_page == '📡 PİYASA RADARI':
+        render_piyasa_radari()
+    elif selected_page == '🧠 QUANT LABORATUVARI':
+        render_quant_lab()
+    elif selected_page == '🌍 MAKRO & TEMEL':
+        render_makro_temel()
+    elif selected_page == '⚙️ SİSTEM':
+        render_sistem()
     
     # Footer
     st.divider()
-    st.caption("📊 Finans Terminali | Veriler bilgilendirme amaçlıdır, yatırım tavsiyesi değildir.")
+    st.caption("📊 Finans Terminali v2.0 | Veriler bilgilendirme amaçlıdır, yatırım tavsiyesi değildir.")
 
 
 if __name__ == "__main__":
     main()
+
